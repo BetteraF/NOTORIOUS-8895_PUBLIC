@@ -41,6 +41,8 @@ Module.symvers
 #
 # Top-level generic files
 #
+/NOTO/N950/split_img/
+/NOTO_BUILD/
 /tags
 /TAGS
 /linux
@@ -72,6 +74,8 @@ Module.symvers
 #
 include/config
 include/generated
+scripts/rkp_cfp/tmp
+arch/arm64/boot/dtb/
 arch/*/include/generated
 
 # stgit generated dirs
@@ -94,6 +98,10 @@ GTAGS
 # id-utils files
 ID
 
+*.img
+*.zip
+*.log
+*.dtb
 *.orig
 *~
 \#*#
