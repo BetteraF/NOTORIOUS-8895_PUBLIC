@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2016 TRUSTONIC LIMITED
+ * Copyright (c) 2013-2017 TRUSTONIC LIMITED
  * All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or
@@ -18,6 +18,11 @@
 #include <linux/cpu.h>
 #include <linux/moduleparam.h>
 #include <linux/debugfs.h>
+#include <linux/sched.h>	/* local_clock */
+#include <linux/version.h>
+#if KERNEL_VERSION(4, 11, 0) <= LINUX_VERSION_CODE
+#include <linux/sched/clock.h>	/* local_clock */
+#endif
 #include <linux/uaccess.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
@@ -126,7 +131,7 @@ struct smc_log_entry {
 	struct mc_fc_as_in as_in;
 };
 
-#define SMC_LOG_SIZE 256
+#define SMC_LOG_SIZE 1024
 static struct smc_log_entry smc_log[SMC_LOG_SIZE];
 static int smc_log_index;
 
@@ -406,7 +411,6 @@ static void fastcall_work_func(struct work_struct *work)
 		cpumask_t new_msk = mc_exec_core_switch(mc_fc_generic);
 
 		/* ExySp */
-		//set_cpus_allowed(fastcall_thread, new_msk);
 		set_cpus_allowed_ptr(fastcall_thread, &new_msk);
 #else
 		mc_exec_core_switch(mc_fc_generic);
@@ -444,11 +448,19 @@ static bool mc_fastcall(void *data)
 		.data = data,
 	};
 
+#if KERNEL_VERSION(4, 9, 0) <= LINUX_VERSION_CODE
+	if (!kthread_queue_work(&fastcall_worker, &fc_work.work))
+		return false;
+
+	/* If work is queued or executing, wait for it to finish execution */
+	kthread_flush_work(&fc_work.work);
+#else
 	if (!queue_kthread_work(&fastcall_worker, &fc_work.work))
 		return false;
 
 	/* If work is queued or executing, wait for it to finish execution */
 	flush_kthread_work(&fc_work.work);
+#endif
 #else
 	struct fastcall_work fc_work = {
 		.data = data,
@@ -465,9 +477,8 @@ static bool mc_fastcall(void *data)
 
 int mc_fastcall_init(void)
 {
+	cpumask_t new_msk = CPU_MASK_CPU0;
 	int ret = mc_clock_init();
-	/* ExySp */
-	cpumask_t msk = CPU_MASK_CPU0;
 
 	if (ret)
 		return ret;
@@ -483,9 +494,7 @@ int mc_fastcall_init(void)
 	}
 
 	/* this thread MUST run on CPU 0 at startup */
-	/* ExySp */
-	//set_cpus_allowed(fastcall_thread, CPU_MASK_CPU0);
-	set_cpus_allowed_ptr(fastcall_thread, &msk);
+	set_cpus_allowed_ptr(fastcall_thread, &new_msk);
 
 	wake_up_process(fastcall_thread);
 #ifdef TBASE_CORE_SWITCHER
@@ -610,13 +619,15 @@ int mc_fc_mem_trace(phys_addr_t buffer, u32 size)
 	return convert_fc_ret(mc_fc_generic.as_out.ret);
 }
 
-int mc_fc_nsiq(void)
+int mc_fc_nsiq(u32 sid, u32 payload)
 {
 	union mc_fc_generic fc;
 	int ret;
 
 	memset(&fc, 0, sizeof(fc));
 	fc.as_in.cmd = MC_SMC_N_SIQ;
+	fc.as_in.param[1] = sid;
+	fc.as_in.param[2] = payload;
 	mc_fastcall(&fc);
 	ret = convert_fc_ret(fc.as_out.ret);
 	if (ret)
@@ -625,13 +636,14 @@ int mc_fc_nsiq(void)
 	return ret;
 }
 
-int mc_fc_yield(void)
+int mc_fc_yield(u32 timeslice)
 {
 	union mc_fc_generic fc;
 	int ret;
 
 	memset(&fc, 0, sizeof(fc));
 	fc.as_in.cmd = MC_SMC_N_YIELD;
+	fc.as_in.param[1] = timeslice;
 	mc_fastcall(&fc);
 	ret = convert_fc_ret(fc.as_out.ret);
 	if (ret)

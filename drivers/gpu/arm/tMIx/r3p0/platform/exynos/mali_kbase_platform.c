@@ -118,6 +118,10 @@ bool gpu_check_trace_code(int code)
 		break;
 	case KBASE_TRACE_CODE(LSI_GPU_ON):
 	case KBASE_TRACE_CODE(LSI_GPU_OFF):
+	case KBASE_TRACE_CODE(LSI_ZAP_TIMEOUT):
+	case KBASE_TRACE_CODE(LSI_RESET_GPU_EARLY_DUPE):
+	case KBASE_TRACE_CODE(LSI_RESET_RACE_DETECTED_EARLY_OUT):
+	case KBASE_TRACE_CODE(LSI_PM_SUSPEND):
 	case KBASE_TRACE_CODE(LSI_SUSPEND):
 	case KBASE_TRACE_CODE(LSI_RESUME):
 	case KBASE_TRACE_CODE(LSI_TMU_VALUE):
@@ -263,7 +267,7 @@ static int gpu_validate_attrib_data(struct exynos_context *platform)
 	data = gpu_get_attrib_data(attrib, GPU_DVS);
 	platform->dvs_status = data == 0 ? 0 : data;
 	data = gpu_get_attrib_data(attrib, GPU_INTER_FRAME_PM);
-	platform->inter_frame_pm_status = data == 0 ? 0 : data;
+	platform->inter_frame_pm_feature = data == 0 ? 0 : data;
 
 	data = gpu_get_attrib_data(attrib, GPU_PERF_GATHERING);
 	platform->perf_gathering_status = data == 0 ? 0 : data;
@@ -301,6 +305,11 @@ static int gpu_context_init(struct kbase_device *kbdev)
 	mutex_init(&platform->gpu_dvfs_handler_lock);
 	spin_lock_init(&platform->gpu_dvfs_spinlock);
 
+#ifdef CONFIG_SCHED_HMP
+	mutex_init(&platform->gpu_sched_hmp_lock);
+	platform->ctx_need_qos = false;
+#endif
+
 	gpu_validate_attrib_data(platform);
 
 	core_props = &(kbdev->gpu_props.props.core_props);
@@ -317,6 +326,8 @@ static int gpu_context_init(struct kbase_device *kbdev)
 #ifdef CONFIG_MALI_ASV_CALIBRATION_SUPPORT
 	platform->gpu_auto_cali_status = false;
 #endif
+
+	platform->inter_frame_pm_status = platform->inter_frame_pm_feature;
 
 	return 0;
 }

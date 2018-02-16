@@ -970,20 +970,6 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 
 	req->length = length;
 
-	/* throttle highspeed IRQ rate back slightly */
-	if (gadget_is_dualspeed(dev->gadget) &&
-			 (dev->gadget->speed == USB_SPEED_HIGH)) {
-		dev->tx_qlen++;
-		if (dev->tx_qlen == (dev->qmult/2)) {
-			req->no_interrupt = 0;
-			dev->tx_qlen = 0;
-		} else {
-			req->no_interrupt = 1;
-		}
-	} else {
-		req->no_interrupt = 0;
-	}
-
 	retval = usb_ep_queue(in, req, GFP_ATOMIC);
 #endif
 	switch (retval) {
@@ -1523,7 +1509,7 @@ fail0:
 	return dev->net;
 }
 
-EXPORT_SYMBOL_GPL(gether_alloc_requset);
+EXPORT_SYMBOL_GPL(gether_alloc_request);
 /* gether_alloc_request - get usb request queue */
 int gether_alloc_request(struct gether *link)
 {
@@ -1543,34 +1529,34 @@ int gether_alloc_request(struct gether *link)
 	return result;
 }
 
-EXPORT_SYMBOL_GPL(gether_free_requset);
+EXPORT_SYMBOL_GPL(gether_free_request);
 void gether_free_request(struct gether *link)
 {
 	struct eth_dev		*dev = link->ioport;
 	struct usb_request	*req;
-	
+
 	printk("usb: %s : \n", __func__);
-	
+	spin_lock(&dev->req_lock);
 	while (!list_empty(&dev->tx_reqs)) {
 		req = container_of(dev->tx_reqs.next,
 					struct usb_request, list);
 		list_del(&req->list);
-
+		spin_unlock(&dev->req_lock);
 		if (link->multi_pkt_xfer)
 			kfree(req->buf);
 		usb_ep_free_request(link->in_ep, req);
+		spin_lock(&dev->req_lock);
 	}
-
-	link->in_ep->desc = NULL;
-	usb_ep_disable(link->out_ep);
 
 	while (!list_empty(&dev->rx_reqs)) {
 		req = container_of(dev->rx_reqs.next,
 					struct usb_request, list);
 		list_del(&req->list);
-
+		spin_unlock(&dev->req_lock);
 		usb_ep_free_request(link->out_ep, req);
+		spin_lock(&dev->req_lock);
 	}
+	spin_unlock(&dev->req_lock);
 }
 
 EXPORT_SYMBOL_GPL(gether_connect);

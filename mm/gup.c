@@ -47,10 +47,13 @@ static bool __need_migrate_cma_page(struct page *page,
 	if (!(flags & FOLL_CMA))
 		return false;
 
-	migrate_prep_local();
-
-	if (!PageLRU(page))
-		return false;
+	if (!PageLRU(page)) {
+		migrate_prep_local();
+		if (WARN_ON(!PageLRU(page))) {
+			dump_page(page, "non-lru cma page");
+			return false;
+		}
+	}
 
 	return true;
 }
@@ -435,11 +438,6 @@ static int faultin_page(struct task_struct *tsk, struct vm_area_struct *vma,
 	/* mlock all present pages, but do not fault in new pages */
 	if ((*flags & (FOLL_POPULATE | FOLL_MLOCK)) == FOLL_MLOCK)
 		return -ENOENT;
-	/* For mm_populate(), just skip the stack guard page. */
-	if ((*flags & FOLL_POPULATE) &&
-			(stack_guard_page_start(vma, address) ||
-			 stack_guard_page_end(vma, address + PAGE_SIZE)))
-		return -ENOENT;
 	if (*flags & FOLL_WRITE)
 		fault_flags |= FAULT_FLAG_WRITE;
 	if (nonblocking)
@@ -604,6 +602,9 @@ long __get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
 	 */
 	if (!(gup_flags & FOLL_FORCE))
 		gup_flags |= FOLL_NUMA;
+
+	if ((gup_flags & FOLL_CMA) != 0)
+		migrate_prep();
 
 	do {
 		struct page *page;
@@ -895,6 +896,10 @@ __always_inline long __get_user_pages_unlocked(struct task_struct *tsk, struct m
 {
 	long ret;
 	int locked = 1;
+
+	if ((gup_flags & FOLL_CMA) != 0)
+		migrate_prep();
+
 	down_read(&mm->mmap_sem);
 	ret = __get_user_pages_locked(tsk, mm, start, nr_pages, write, force,
 				      pages, NULL, &locked, false, gup_flags);
@@ -1484,7 +1489,6 @@ int __get_user_pages_fast(unsigned long start, int nr_pages, int write,
 	 * We do not adopt an rcu_read_lock(.) here as we also want to
 	 * block IPIs that come from THPs splitting.
 	 */
-
 	local_irq_save(flags);
 	pgdp = pgd_offset(mm, addr);
 	do {

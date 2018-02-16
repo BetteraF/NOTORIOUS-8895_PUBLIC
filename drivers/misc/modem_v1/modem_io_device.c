@@ -24,6 +24,7 @@
 #include <linux/device.h>
 #include <linux/module.h>
 #include <soc/samsung/pmu-cp.h>
+#include <trace/events/napi.h>
 
 #include "modem_prj.h"
 #include "modem_utils.h"
@@ -343,10 +344,14 @@ static int rx_multi_pdp(struct sk_buff *skb)
 	mif_pkt(iod->id, "IOD-RX", skb);
 #endif
 
+#ifdef CONFIG_LINK_DEVICE_NAPI
+	ret = netif_receive_skb(skb);
+#else /* !CONFIG_LINK_DEVICE_NAPI */
 	if (in_interrupt())
 		ret = netif_rx(skb);
 	else
 		ret = netif_rx_ni(skb);
+#endif /* CONFIG_LINK_DEVICE_NAPI */
 
 	if (ret != NET_RX_SUCCESS) {
 		mif_err_limited("%s: %s<-%s: ERR! netif_rx fail\n",
@@ -522,9 +527,15 @@ static int misc_release(struct inode *inode, struct file *filp)
 	struct io_device *iod = (struct io_device *)filp->private_data;
 	struct modem_shared *msd = iod->msd;
 	struct link_device *ld;
+	int i;
 
-	if (atomic_dec_and_test(&iod->opened))
+	if (atomic_dec_and_test(&iod->opened)) {
 		skb_queue_purge(&iod->sk_rx_q);
+
+		/* purge multi_frame queue */
+		for (i = 0; i < NUM_SIPC_MULTI_FRAME_IDS; i++)
+			skb_queue_purge(&iod->sk_multi_q[i]);
+	}
 
 	list_for_each_entry(ld, &msd->link_dev_list, list) {
 		if (IS_CONNECTED(iod, ld) && ld->terminate_comm)
@@ -712,8 +723,10 @@ static long misc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 	case IOCTL_MODEM_FORCE_CRASH_EXIT:
 		if (mc->ops.modem_force_crash_exit) {
-			mif_err("%s: IOCTL_MODEM_FORCE_CRASH_EXIT\n",
-				iod->name);
+			if (arg)
+ 				ld->crash_type = arg;
+			mif_err("%s: IOCTL_MODEM_FORCE_CRASH_EXIT (%d)\n",
+				iod->name, ld->crash_type);
 			return mc->ops.modem_force_crash_exit(mc);
 		}
 		mif_err("%s: !mc->ops.modem_force_crash_exit\n", iod->name);
@@ -1105,6 +1118,7 @@ static int vnet_open(struct net_device *ndev)
 		}
 	}
 	list_add(&iod->node_ndev, &iod->msd->activated_ndev_list);
+
 	netif_start_queue(ndev);
 
 	mif_err("%s (opened %d) by %s\n",
@@ -1486,7 +1500,6 @@ int sipc5_init_io_device(struct io_device *iod)
 
 		iod->miscdev.minor = MISC_DYNAMIC_MINOR;
 		iod->miscdev.name = iod->name;
-		iod->miscdev.fops = &misc_io_fops;
 
 		ret = misc_register(&iod->miscdev);
 		if (ret)
@@ -1525,6 +1538,8 @@ int sipc5_init_io_device(struct io_device *iod)
 void sipc5_deinit_io_device(struct io_device *iod)
 {
 	mif_err("%s: io_typ=%d\n", iod->name, iod->io_typ);
+	
+	wake_lock_destroy(&iod->wakelock);
 	
 	/* De-register misc or net device */
 	switch (iod->io_typ) {

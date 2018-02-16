@@ -365,8 +365,7 @@ static void SEC_ufs_uic_error_check(struct ufs_hba *hba, bool cmd_count, bool fa
 			uic_err_cnt->DME_ERROR_cnt &= 0xfe;
 			uic_err_cnt->DME_ERROR_cnt++;
 		}
-		if (uic_error)
-			uic_err_cnt->UIC_err++;
+		uic_err_cnt->UIC_err++;
 
 	} else if (fatal_error) {
 		struct SEC_UFS_Fatal_err_count *fatal_err_cnt = &(err_info->Fatal_err_count);
@@ -387,7 +386,8 @@ static void SEC_ufs_uic_error_check(struct ufs_hba *hba, bool cmd_count, bool fa
 			fatal_err_cnt->LLE &= 0xfe;
 			fatal_err_cnt->LLE++;
 		}
-		fatal_err_cnt->Fatal_err++;
+		if (hba->errors & INT_FATAL_ERRORS)
+			fatal_err_cnt->Fatal_err++;
 	}
 }
 
@@ -400,9 +400,11 @@ static void SEC_ufs_utp_error_check(struct ufs_hba *hba, struct scsi_cmnd *cmd, 
 		if (tm_cmd == UFS_QUERY_TASK) {
 			utp_err->UTMR_query_task_count &= 0xfe;
 			utp_err->UTMR_query_task_count++;
+			utp_err->UTP_err++;
 		} else if (tm_cmd == UFS_ABORT_TASK) {
 			utp_err->UTMR_abort_task_count &= 0xfe;
 			utp_err->UTMR_abort_task_count++;
+			utp_err->UTP_err++;
 		}
 	} else {
 		// cmd logging
@@ -411,21 +413,25 @@ static void SEC_ufs_utp_error_check(struct ufs_hba *hba, struct scsi_cmnd *cmd, 
 		if (opcode == WRITE_10) {
 			utp_err->UTR_write_err &= 0xfe;
 			utp_err->UTR_write_err++;
+			utp_err->UTP_err++;
 		} else if (opcode == READ_10) {
 			utp_err->UTR_read_err &= 0xfe;
 			utp_err->UTR_read_err++;
+			utp_err->UTP_err++;
 		} else if (opcode == SYNCHRONIZE_CACHE) {
 			utp_err->UTR_sync_cache_err &= 0xfe;
 			utp_err->UTR_sync_cache_err++;
+			utp_err->UTP_err++;
 		} else if (opcode == UNMAP) {
 			utp_err->UTR_unmap_err &= 0xfe;
 			utp_err->UTR_unmap_err++;
+			utp_err->UTP_err++;
 		} else {
 			utp_err->UTR_etc_err &= 0xfe;
 			utp_err->UTR_etc_err++;
+			utp_err->UTP_err++;
 		}
 	}
-	utp_err->UTP_err++;
 }
 
 static void SEC_ufs_query_error_check(struct ufs_hba *hba, enum dev_cmd_type cmd_type)
@@ -438,6 +444,7 @@ static void SEC_ufs_query_error_check(struct ufs_hba *hba, enum dev_cmd_type cmd
 	if (cmd_type == DEV_CMD_TYPE_NOP) {
 		query_cnt->NOP_err &= 0xfe;
 		query_cnt->NOP_err++;
+		query_cnt->Query_err++;
 	} else {
 		switch (opcode) {
 		case UPIU_QUERY_OPCODE_READ_DESC:
@@ -475,9 +482,9 @@ static void SEC_ufs_query_error_check(struct ufs_hba *hba, enum dev_cmd_type cmd
 		default:
 			break;
 		}
+		if (opcode && opcode < UPIU_QUERY_OPCODE_MAX)
+			query_cnt->Query_err++;
 	}
-	query_cnt->Query_err++;
-
 }
 #endif	// SEC_UFS_ERROR_COUNT
 
@@ -1420,16 +1427,32 @@ ufshcd_send_uic_cmd(struct ufs_hba *hba, struct uic_command *uic_cmd)
 	spin_unlock_irqrestore(hba->host->host_lock, flags);
 	if (!ret)
 		ret = ufshcd_wait_for_uic_cmd(hba, uic_cmd);
-#if defined(SEC_UFS_ERROR_COUNT)
-	else
-		SEC_ufs_uic_error_check(hba, true, false);
-#endif
 
 	mutex_unlock(&hba->uic_cmd_mutex);
 
 	ufshcd_release(hba);
 	return ret;
 }
+
+#ifdef CUSTOMIZE_UPIU_FLAGS
+SIO_PATCH_VERSION(UPIU_customize, 1, 0, "");
+
+static void set_customized_upiu_flags(struct ufshcd_lrb *lrbp, u32 *upiu_flags)
+{
+	if (lrbp->command_type == UTP_CMD_TYPE_SCSI) {
+		if (lrbp->cmd->request->cmd_flags & REQ_WRITE) {
+			if (lrbp->cmd->request->cmd_flags & REQ_FLUSH)
+				*upiu_flags |= UPIU_TASK_ATTR_HEADQ;
+			else if (lrbp->cmd->request->cmd_flags & REQ_DISCARD)
+				*upiu_flags |= UPIU_TASK_ATTR_ORDERED;
+			else if (lrbp->cmd->request->cmd_flags & REQ_SYNC)
+				*upiu_flags |= UPIU_COMMAND_PRIORITY_HIGH;
+		} else {
+			*upiu_flags |= UPIU_COMMAND_PRIORITY_HIGH;
+		}
+	}
+}
+#endif
 
 #if defined(CONFIG_FMP_UFS)
 static void get_enc_mode_from_bio(struct bio *bio, int *enc_mode)
@@ -1700,46 +1723,15 @@ static void ufshcd_prepare_req_desc_hdr(struct ufshcd_lrb *lrbp,
 	if (cmd_dir == DMA_FROM_DEVICE) {
 		data_direction = UTP_DEVICE_TO_HOST;
 		*upiu_flags = UPIU_CMD_FLAGS_READ;
-#ifdef COMMAND_PRIORITY
-		/*
-		 *	UFS header FLAGS bit3 meant for command priority
-		 *			0 - Normal priority
-		 *			1 - High priority
-		 *
-		 * Set High Priority for SYNC reads
-		 */
-		if (lrbp->command_type == UTP_CMD_TYPE_SCSI) {
-			*upiu_flags |= UPIU_COMMAND_PRIORITY_HIGH;
-		}
-#endif
 	} else if (cmd_dir == DMA_TO_DEVICE) {
 		data_direction = UTP_HOST_TO_DEVICE;
 		*upiu_flags = UPIU_CMD_FLAGS_WRITE;
-#ifdef COMMAND_PRIORITY
-		/*
-		 * Set High Priority for SYNC writes
-		 */
-		if ((lrbp->command_type == UTP_CMD_TYPE_SCSI) &&
-			(lrbp->cmd->request->cmd_flags & REQ_SYNC) &&
-			!(lrbp->cmd->request->cmd_flags & REQ_FLUSH)) {
-			*upiu_flags |= UPIU_COMMAND_PRIORITY_HIGH;
-		}
-#endif
 	} else {
 		data_direction = UTP_NO_DATA_TRANSFER;
 		*upiu_flags = UPIU_CMD_FLAGS_NONE;
 	}
 
-#ifdef HEAD_OF_Q_FEATURE
-	/*
-	 * Set HEAD_OF_QUEUE for FLUSH request (REQ_FLUSH)
-	 *	UFS header FLAGS bit0,1 denotes TASK_ATTRIBUTE
-	 */
-	if ((lrbp->command_type == UTP_CMD_TYPE_SCSI) &&
-			(lrbp->cmd->request->cmd_flags & REQ_FLUSH)) {
-		*upiu_flags |= UPIU_TASK_ATTR_HEADQ;
-	}
-#endif
+	set_customized_upiu_flags(lrbp, upiu_flags);
 
 	dword_0 = data_direction | (lrbp->command_type
 				<< UPIU_COMMAND_TYPE_OFFSET);
@@ -2021,6 +2013,9 @@ static int ufshcd_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmd)
 	spin_lock_irqsave(hba->host->host_lock, flags);
 	if (hba->vops && hba->vops->set_nexus_t_xfer_req)
 		hba->vops->set_nexus_t_xfer_req(hba, tag, lrbp->cmd);
+#ifdef CONFIG_SCSI_UFS_CMD_LOGGING
+	exynos_ufs_cmd_log_start(hba, cmd);
+#endif
 	ufshcd_send_command(hba, tag);
 
 	if (hba->monitor.flag & UFSHCD_MONITOR_LEVEL1)
@@ -2246,7 +2241,7 @@ out_put_tag:
 	ufshcd_put_dev_cmd_tag(hba, tag);
 	wake_up(&hba->dev_cmd.tag_wq);
 #if defined(SEC_UFS_ERROR_COUNT)
-	if (err)
+	if (err && (cmd_type != DEV_CMD_TYPE_NOP))
 		SEC_ufs_query_error_check(hba, cmd_type);
 #endif
 	return err;
@@ -3222,7 +3217,6 @@ out:
 	/* Dump debugging information to system memory */
 	if (ret) {
 #if defined(SEC_UFS_ERROR_COUNT)
-		SEC_ufs_uic_error_check(hba, true, false);
 		SEC_ufs_operation_check(hba, cmd->command);
 #endif
 		ufshcd_vops_dbg_register_dump(hba);
@@ -3812,7 +3806,7 @@ static int ufshcd_link_startup(struct ufs_hba *hba)
 		 * but we can't be sure if the link is up until link startup
 		 * succeeds. So reset the local Uni-Pro and try again.
 		 */
-		if (ret && ufshcd_hba_enable(hba))
+		if ((ret && !retries) || (ret && ufshcd_hba_enable(hba)))
 			goto out;
 	} while (ret && retries--);
 
@@ -3873,8 +3867,12 @@ static int ufshcd_verify_dev_init(struct ufs_hba *hba)
 	mutex_unlock(&hba->dev_cmd.lock);
 	ufshcd_release(hba);
 
-	if (err)
+	if (err) {
+#if defined(SEC_UFS_ERROR_COUNT)
+		SEC_ufs_query_error_check(hba, DEV_CMD_TYPE_NOP);
+#endif
 		dev_err(hba->dev, "%s: NOP OUT failed %d\n", __func__, err);
+	}
 	return err;
 }
 
@@ -4304,6 +4302,9 @@ static void __ufshcd_transfer_req_compl(struct ufs_hba *hba, int reason)
 			clear_bit_unlock(index, &hba->lrb_in_use);
 			/* Do not touch lrbp after scsi done */
 			cmd->scsi_done(cmd);
+#ifdef CONFIG_SCSI_UFS_CMD_LOGGING
+			exynos_ufs_cmd_log_end(hba, index);
+#endif
 			__ufshcd_release(hba);
 
 			if (hba->monitor.flag & UFSHCD_MONITOR_LEVEL1)
@@ -4498,18 +4499,25 @@ out:
 }
 
 /**
- * ufshcd_force_reset_auto_bkops - force enable of auto bkops
+ * ufshcd_force_reset_auto_bkops - force reset auto bkops state
  * @hba: per adapter instance
  *
  * After a device reset the device may toggle the BKOPS_EN flag
  * to default value. The s/w tracking variables should be updated
- * as well. Do this by forcing enable of auto bkops.
+ * as well. This function would change the auto-bkops state based on
+ * UFSHCD_CAP_KEEP_AUTO_BKOPS_ENABLED_EXCEPT_SUSPEND.
  */
-static void  ufshcd_force_reset_auto_bkops(struct ufs_hba *hba)
+static void ufshcd_force_reset_auto_bkops(struct ufs_hba *hba)
 {
-	hba->auto_bkops_enabled = false;
-	hba->ee_ctrl_mask |= MASK_EE_URGENT_BKOPS;
-	ufshcd_enable_auto_bkops(hba);
+	if (ufshcd_keep_autobkops_enabled_except_suspend(hba)) {
+		hba->auto_bkops_enabled = false;
+		hba->ee_ctrl_mask |= MASK_EE_URGENT_BKOPS;
+		ufshcd_enable_auto_bkops(hba);
+	} else {
+		hba->auto_bkops_enabled = true;
+		hba->ee_ctrl_mask &= ~MASK_EE_URGENT_BKOPS;
+		ufshcd_disable_auto_bkops(hba);
+	}
 }
 
 static inline int ufshcd_get_bkops_status(struct ufs_hba *hba, u32 *status)
@@ -4788,7 +4796,8 @@ static void ufshcd_update_uic_error(struct ufs_hba *hba)
 	dev_dbg(hba->dev, "%s: UIC error flags = 0x%08x\n",
 			__func__, hba->uic_error);
 #if defined(SEC_UFS_ERROR_COUNT)
-	SEC_ufs_uic_error_check(hba, true, false);
+	if (hba->uic_error)
+		SEC_ufs_uic_error_check(hba, true, false);
 #endif
 }
 
@@ -5717,6 +5726,9 @@ out:
 	if (ret && re_cnt++ < UFS_LINK_SETUP_RETRIES) {
 		dev_err(hba->dev, "%s failed with err %d, retrying:%d\n",
 			__func__, ret, re_cnt);
+#if defined(CONFIG_SCSI_UFS_TEST_MODE)
+		ufshcd_vops_dbg_register_dump(hba);
+#endif			
 		goto retry;
 	} else if (ret && re_cnt >= UFS_LINK_SETUP_RETRIES) {
 		dev_err(hba->dev, "%s failed after retries with err %d\n",
@@ -6071,11 +6083,14 @@ static int ufshcd_config_vreg(struct device *dev,
 		struct ufs_vreg *vreg, bool on)
 {
 	int ret = 0;
-	struct regulator *reg = vreg->reg;
-	const char *name = vreg->name;
+	struct regulator *reg;
+	const char *name;
 	int min_uV, uA_load;
 
 	BUG_ON(!vreg);
+
+	reg = vreg->reg;
+	name = vreg->name;
 
 	if (regulator_count_voltages(reg) > 0) {
 		min_uV = on ? vreg->min_uV : 0;
@@ -6509,7 +6524,7 @@ static int ufshcd_set_dev_pwr_mode(struct ufs_hba *hba,
 	 * already suspended childs.
 	 */
 	ret = scsi_execute_req_flags(sdp, cmd, DMA_NONE, NULL, 0, &sshdr,
-				     START_STOP_TIMEOUT, 0, NULL, REQ_PM);
+				     UFS_START_STOP_TIMEOUT, 2, NULL, REQ_PM);
 	if (ret) {
 		sdev_printk(KERN_WARNING, sdp,
 			    "START_STOP failed for power mode: %d, result %x\n",
@@ -6910,14 +6925,18 @@ static int ufshcd_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 			goto set_old_link_state;
 	}
 
-	/*
-	 * If BKOPs operations are urgently needed at this moment then
-	 * keep auto-bkops enabled or else disable it.
-	 */
-	ufshcd_urgent_bkops(hba);
 #ifdef CONFIG_SCSI_UFS_ASYNC_RELINK
 async_resume:
 #endif
+	if (ufshcd_keep_autobkops_enabled_except_suspend(hba))
+		ufshcd_enable_auto_bkops(hba);
+	else
+		/*
+		 * If BKOPs operations are urgently needed at this moment then
+		 * keep auto-bkops enabled or else disable it.
+		 */
+		ufshcd_urgent_bkops(hba);
+
 	hba->clk_gating.is_suspended = false;
 
 #if defined(CONFIG_PM_DEVFREQ)
@@ -7172,7 +7191,7 @@ static void ufshcd_add_unique_number_sysfs_nodes(struct ufs_hba *hba)
 	hba->unique_number_attr.store = NULL;
 	sysfs_attr_init(&hba->unique_number_attr.attr);
 	hba->unique_number_attr.attr.name = "unique_number";
-	hba->unique_number_attr.attr.mode = S_IRUGO;
+	hba->unique_number_attr.attr.mode = S_IRUSR|S_IRGRP;
 	if (device_create_file(dev, &hba->unique_number_attr))
 		dev_err(hba->dev, "Failed to create sysfs for unique_number\n");
 }
@@ -7642,6 +7661,10 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 		devfreq_suspend_device(hba->devfreq);
 		hba->clk_scaling.window_start_t = 0;
 	}
+#endif
+
+#if defined(CONFIG_SCSI_UFS_TEST_MODE)
+	dev_info(hba->dev, "UFS test mode enabled\n");
 #endif
 
 	/* init ufs_sec_debug function */

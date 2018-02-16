@@ -1134,7 +1134,16 @@ config TOUCHSCREEN_DUMP_MODE
 
 	  If unsure, say N.
 
+config SWEEP2SLEEP
+       tristate "Sweep to put device to sleep"
+       default y
+       help
+         Say Y here to support sweep2sleep
+
 source "drivers/input/touchscreen/stm/Kconfig"
+source "drivers/input/touchscreen/stm/fts7/Kconfig"
 source "drivers/input/touchscreen/sec_ts/Kconfig"
 source "drivers/input/touchscreen/sec_ts_a552/Kconfig"
+source "drivers/input/touchscreen/synaptics_dsx2/Kconfig"
+source "drivers/input/touchscreen/sec_ts_y661/Kconfig"
 endif

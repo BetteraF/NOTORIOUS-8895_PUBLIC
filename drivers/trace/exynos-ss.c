@@ -65,6 +65,10 @@
 #endif /* CONFIG_SEC_DEBUG */
 #endif /* CONFIG_SEC_EXT */
 
+#ifdef CONFIG_EXYNOS_SNAPSHOT_CRASH_KEY
+#include <linux/gpio_keys.h>
+#endif
+
 /*  Size domain */
 #define ESS_KEEP_HEADER_SZ		(SZ_256 * 3)
 #define ESS_HEADER_SZ			SZ_4K
@@ -503,11 +507,11 @@ struct exynos_ss_interface {
 #ifdef CONFIG_S3C2410_WATCHDOG
 extern int s3c2410wdt_set_emergency_stop(void);
 extern int s3c2410wdt_set_emergency_reset(unsigned int timeout);
-extern int s3c2410wdt_keepalive_emergency(void);
+extern int s3c2410wdt_keepalive_emergency(bool reset);
 #else
 #define s3c2410wdt_set_emergency_stop() 	(-1)
 #define s3c2410wdt_set_emergency_reset(a)	do { } while(0)
-#define s3c2410wdt_keepalive_emergency()	do { } while(0)
+#define s3c2410wdt_keepalive_emergency(a)	do { } while(0)
 #endif
 extern void *return_address(int);
 extern void (*arm_pm_restart)(char str, const char *cmd);
@@ -779,6 +783,13 @@ unsigned long exynos_ss_get_spare_paddr(unsigned int offset)
 	return kevent_vaddr;
 }
 
+static u32 exynos_ss_get_reason(void)
+{
+	if (exynos_ss_get_enable("log_kevents", true))
+		return	__raw_readl(S5P_VA_SS_EMERGENCY_REASON);
+	return -1;
+}
+
 unsigned int exynos_ss_get_item_size(char* name)
 {
 	unsigned long i;
@@ -790,6 +801,18 @@ unsigned int exynos_ss_get_item_size(char* name)
 	return 0;
 }
 EXPORT_SYMBOL(exynos_ss_get_item_size);
+
+unsigned long exynos_ss_get_item_vaddr(char *name)
+{
+	unsigned long i;
+
+	for (i = 0; i < ARRAY_SIZE(ess_items); i++) {
+		if (!strncmp(ess_items[i].name, name, strlen(name)))
+			return ess_items[i].entry.vaddr;
+	}
+	return 0;
+}
+EXPORT_SYMBOL(exynos_ss_get_item_vaddr);
 
 unsigned int exynos_ss_get_item_paddr(char* name)
 {
@@ -829,11 +852,13 @@ int exynos_ss_prepare_panic(void)
 
 	if (unlikely(!ess_base.enabled))
 		return 0;
+
+	exynos_ss_report_reason(ESS_SIGN_PANIC);
 	/*
 	 * kick watchdog to prevent unexpected reset during panic sequence
 	 * and it prevents the hang during panic sequence by watchedog
 	 */
-	s3c2410wdt_keepalive_emergency();
+	s3c2410wdt_keepalive_emergency(true);
 
 	for_each_possible_cpu(cpu) {
 		mpidr = cpu_logical_map(cpu);
@@ -891,6 +916,11 @@ void exynos_ss_hook_hardlockup_entry(void *v_regs)
 		pr_emerg("\n--------------------------------------------------------------------------\n"
 			"      Debugging Information for Hardlockup core - CPU %d"
 			"\n--------------------------------------------------------------------------\n\n", cpu);
+
+#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
+		sec_debug_set_extra_info_backtrace_cpu(v_regs, cpu);
+#endif
+
 	}
 }
 
@@ -1034,6 +1064,9 @@ int exynos_ss_post_reboot(void)
 	pr_emerg("exynos-snapshot: normal reboot done\n");
 
 	exynos_ss_save_context(NULL);
+#ifdef CONFIG_SEC_DEBUG
+	sec_debug_reboot_handler();
+#endif
 	flush_cache_all();
 
 	return 0;
@@ -1186,7 +1219,7 @@ int exynos_ss_save_core(void *v_regs)
 }
 EXPORT_SYMBOL(exynos_ss_save_core);
 
-int exynos_ss_save_context(void *v_regs)
+int __exynos_ss_save_context(void *v_regs, unsigned int val)
 {
 	unsigned long flags;
 	struct pt_regs *regs = (struct pt_regs *)v_regs;
@@ -1203,7 +1236,7 @@ int exynos_ss_save_context(void *v_regs)
 		exynos_ss_save_system(per_cpu(ess_mmu_reg, smp_processor_id()));
 		exynos_ss_save_core(regs);
 		exynos_ss_dump();
-		exynos_ss_set_core_panic_stat(ESS_SIGN_PANIC, smp_processor_id());
+		exynos_ss_set_core_panic_stat(val, smp_processor_id());
 		pr_emerg("exynos-snapshot: context saved(CPU:%d)\n",
 							smp_processor_id());
 	} else
@@ -1212,6 +1245,16 @@ int exynos_ss_save_context(void *v_regs)
 
 	flush_cache_all();
 	local_irq_restore(flags);
+	return 0;
+}
+
+int exynos_ss_save_context(void *v_regs)
+{
+	u32 val = 0;
+
+	val = exynos_ss_get_reason();
+	pr_emerg("exynos-snapshot: exynos_ss_get_reason 0x%X (CPU:%d)\n", val, smp_processor_id());
+	__exynos_ss_save_context(v_regs, val);
 	return 0;
 }
 EXPORT_SYMBOL(exynos_ss_save_context);
@@ -1425,7 +1468,7 @@ void exynos_ss_dump_one_task_info(struct task_struct *tsk, bool is_main)
 	 * and it prevents the hang during panic sequence by watchedog
 	 */
 	touch_softlockup_watchdog();
-	s3c2410wdt_keepalive_emergency();
+	s3c2410wdt_keepalive_emergency(false);
 
 	pr_info("%8d %8d %8d %16lld %c(%d) %3d  %16zx %16zx  %16zx %c %16s [%s]\n",
 			tsk->pid, (int)(tsk->utime), (int)(tsk->stime),
@@ -1449,7 +1492,7 @@ static inline struct task_struct *get_next_thread(struct task_struct *tsk)
 				thread_group);
 }
 
-static void exynos_ss_dump_task_info(void)
+void exynos_ss_dump_task_info(void)
 {
 	struct task_struct *frst_tsk;
 	struct task_struct *curr_tsk;
@@ -1487,6 +1530,7 @@ static void exynos_ss_dump_task_info(void)
 	}
 	pr_info(" ----------------------------------------------------------------------------------------------------------------------------\n");
 }
+EXPORT_SYMBOL(exynos_ss_dump_task_info);
 
 #ifdef CONFIG_EXYNOS_SNAPSHOT_SFRDUMP
 static bool exynos_ss_check_pmu(struct exynos_ss_sfrdump *sfrdump,
@@ -1651,16 +1695,15 @@ static int exynos_ss_sfr_dump_init(struct device_node *np)
 }
 #endif
 
-#ifdef CONFIG_SEC_UPLOAD
-extern void check_crash_keys_in_user(unsigned int code, int onoff);
-#endif
+#ifdef CONFIG_EXYNOS_SNAPSHOT_CRASH_KEY
 #ifdef CONFIG_TOUCHSCREEN_DUMP_MODE
 struct tsp_dump_callbacks dump_callbacks;
 #endif
-
-#ifdef CONFIG_EXYNOS_SNAPSHOT_CRASH_KEY
-void exynos_ss_check_crash_key(unsigned int code, int value)
+static int exynos_ss_check_crash_key(struct notifier_block *nb,
+				   unsigned long c, void *v)
 {
+	unsigned int code = c;
+	int value = *(int *)v;
 	static bool volup_p;
 	static bool voldown_p;
 	static int loopcount;
@@ -1670,12 +1713,8 @@ void exynos_ss_check_crash_key(unsigned int code, int value)
 	static const unsigned int VOLUME_DOWN = KEY_VOLUMEDOWN;
 
 #ifdef CONFIG_SEC_DEBUG
-	hard_reset_hook(code, value);
 	if ((sec_debug_get_debug_level() & 0x1) != 0x1) {
-#ifdef CONFIG_SEC_UPLOAD
-		check_crash_keys_in_user(code, value);
-#endif
-		return;
+		return NOTIFY_DONE;
 	}
 #endif
 
@@ -1730,7 +1769,11 @@ void exynos_ss_check_crash_key(unsigned int code, int value)
 			voldown_p = false;
 		}
 	}
+	return NOTIFY_OK;
 }
+static struct notifier_block nb_gpio_keys = {
+	.notifier_call = exynos_ss_check_crash_key
+};
 #endif
 
 
@@ -2092,9 +2135,6 @@ static int exynos_ss_reboot_handler(struct notifier_block *nb,
 		return 0;
 
 	pr_emerg("exynos-snapshot: normal reboot starting\n");
-#ifdef CONFIG_SEC_DEBUG
-	sec_debug_reboot_handler();
-#endif
 
 	return 0;
 }
@@ -2556,6 +2596,9 @@ static int __init exynos_ss_init(void)
 		register_hook_logger(exynos_ss_hook_logger);
 #endif
 		register_reboot_notifier(&nb_reboot_block);
+#ifdef CONFIG_EXYNOS_SNAPSHOT_CRASH_KEY
+		register_gpio_keys_notifier(&nb_gpio_keys);
+#endif
 		atomic_notifier_chain_register(&panic_notifier_list, &nb_panic_block);
 	} else
 		pr_err("exynos-snapshot: %s failed\n", __func__);

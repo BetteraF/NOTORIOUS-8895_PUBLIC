@@ -27,6 +27,12 @@
 
 #include "exynos-acme.h"
 
+// AP: Default startup frequencies
+#define CONFIG_EXYNOS_CPU_FREQ_MIN_CLUSTER1	455000
+#define CONFIG_EXYNOS_CPU_FREQ_MAX_CLUSTER1	1690000
+#define CONFIG_EXYNOS_CPU_FREQ_MIN_CLUSTER2	741000
+#define CONFIG_EXYNOS_CPU_FREQ_MAX_CLUSTER2	2314000
+
 /*
  * list head of cpufreq domain
  */
@@ -279,9 +285,32 @@ static int exynos_cpufreq_driver_init(struct cpufreq_policy *policy)
 
 	ret = cpufreq_table_validate_and_show(policy, domain->freq_table);
 	if (ret) {
+		if (policy->cpu <= 3)
+		{
+			policy->cpuinfo.min_freq = CONFIG_EXYNOS_CPU_FREQ_MIN_CLUSTER1;
+			policy->cpuinfo.max_freq = CONFIG_EXYNOS_CPU_FREQ_MAX_CLUSTER1;
+		}
+
+		if (policy->cpu >= 4)
+		{
+			policy->cpuinfo.min_freq = CONFIG_EXYNOS_CPU_FREQ_MIN_CLUSTER2;
+			policy->cpuinfo.max_freq = CONFIG_EXYNOS_CPU_FREQ_MAX_CLUSTER2;
+        }
 		pr_err("%s: invalid frequency table: %d\n", __func__, ret);
 		return ret;
 	}
+	// AP: set default frequencies to prevent overclocking or underclocking during start
+	if (policy->cpu <= 3)
+	{
+		policy->min = CONFIG_EXYNOS_CPU_FREQ_MIN_CLUSTER1;
+		policy->max = CONFIG_EXYNOS_CPU_FREQ_MAX_CLUSTER1;
+	}
+
+	if (policy->cpu >= 4)
+	{
+		policy->min = CONFIG_EXYNOS_CPU_FREQ_MIN_CLUSTER2;
+		policy->max = CONFIG_EXYNOS_CPU_FREQ_MAX_CLUSTER2;
+    }
 
 	policy->cur = get_freq(domain);
 	policy->cpuinfo.transition_latency = TRANSITION_LATENCY;
@@ -439,6 +468,7 @@ static struct cpufreq_driver exynos_driver = {
 	.get		= exynos_cpufreq_get,
 	.suspend	= exynos_cpufreq_suspend,
 	.resume		= exynos_cpufreq_resume,
+	.attr		= cpufreq_generic_attr,
 };
 
 /*********************************************************************
@@ -907,7 +937,7 @@ static ssize_t store_cpufreq_min_limit(struct kobject *kobj,
 		scale++;
 
 		if (set_max) {
-			unsigned int qos = domain->max_freq;
+			unsigned int qos = cal_dfs_get_max_freq(domain->cal_id);
 
 			if (domain->user_default_qos)
 				qos = domain->user_default_qos;
@@ -946,7 +976,7 @@ static ssize_t store_cpufreq_min_limit(struct kobject *kobj,
 		else
 			control_hmp_boost(false);
 
-		freq = min(freq, domain->max_freq);
+		freq = min(freq, (unsigned int)cal_dfs_get_max_freq(domain->cal_id));
 		pm_qos_update_request(&domain->user_min_qos_req, freq);
 
 		set_max = true;
@@ -971,7 +1001,7 @@ static ssize_t store_cpufreq_min_limit_wo_boost(struct kobject *kobj,
 		scale++;
 
 		if (set_max) {
-			unsigned int qos = domain->max_freq;
+			unsigned int qos = cal_dfs_get_max_freq(domain->cal_id);
 
 			if (domain->user_default_qos)
 				qos = domain->user_default_qos;
@@ -1009,7 +1039,7 @@ static ssize_t store_cpufreq_min_limit_wo_boost(struct kobject *kobj,
 			pr_info("HMP boost was already activated by cpufreq_min_limit node");
 #endif
 
-		freq = min(freq, domain->max_freq);
+		freq = min(freq, (unsigned int)cal_dfs_get_max_freq(domain->cal_id));
 		pm_qos_update_request(&domain->user_min_qos_wo_boost_req, freq);
 
 		set_max = true;
@@ -1595,12 +1625,12 @@ static __init int init_domain(struct exynos_cpufreq_domain *domain,
 
 	/*
 	 * If max-freq property exists in device tree, max frequency is
-	 * selected to smaller one between the value defined in device
-	 * tree and CAL. In case of min-freq, min frequency is selected
+	 * selected to the value defined in device tree.
+	 * In case of min-freq, min frequency is selected
 	 * to bigger one.
 	 */
 	if (!of_property_read_u32(dn, "max-freq", &val))
-		domain->max_freq = min(domain->max_freq, val);
+		domain->max_freq = val;
 	if (!of_property_read_u32(dn, "min-freq", &val))
 		domain->min_freq = max(domain->min_freq, val);
 

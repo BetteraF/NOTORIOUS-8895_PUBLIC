@@ -107,6 +107,7 @@
 /* #define SENSOR_PANIC_ENABLE */
 #define OVERFLOW_PANIC_ENABLE_ISCHAIN
 #define OVERFLOW_PANIC_ENABLE_CSIS
+#define ENABLE_KERNEL_LOG_DUMP
 /* #define FIXED_FPS_DEBUG */
 
 /* 5fps */
@@ -120,6 +121,7 @@
 /* #define DBG_DRAW_DIGIT */
 /* #define DBG_IMAGE_DUMP */
 /* #define DBG_META_DUMP */
+#define DBG_HAL_DEAD_PANIC_DELAY (500) /* ms */
 #define DBG_DMA_DUMP_PATH	"/data"
 #define DBG_DMA_DUMP_INTEVAL	33	/* unit : frame */
 #define DBG_DMA_DUMP_VID_COND(vid)	((vid == FIMC_IS_VIDEO_SS0_NUM) || \

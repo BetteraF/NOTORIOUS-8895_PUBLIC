@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2016 TRUSTONIC LIMITED
+ * Copyright (c) 2013-2017 TRUSTONIC LIMITED
  * All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or
@@ -19,6 +19,10 @@
 #include <linux/irq.h>
 #include <linux/kthread.h>
 #include <linux/of_irq.h>
+#include <linux/version.h>
+#if KERNEL_VERSION(4, 11, 0) <= LINUX_VERSION_CODE
+#include <linux/sched/clock.h>	/* local_clock */
+#endif
 
 #include "public/mc_user.h"
 
@@ -106,6 +110,15 @@ static inline void notif_queue_push(u32 session_id, u32 payload)
 	 * We want a ARM dsb() / ARM64 dsb(sy) here
 	 */
 	rmb();
+}
+
+void nq_retrieve_last(u32 *session_id, u32 *payload)
+{
+	struct notification_queue_header *hdr = &l_ctx.nq.tx->hdr;
+	u32 i = (hdr->write_cnt - 1) % hdr->queue_size;
+
+	*session_id = l_ctx.nq.tx->notification[i].session_id;
+	*payload = l_ctx.nq.tx->notification[i].payload;
 }
 
 static inline bool nq_notifications_flush_nolock(void)
@@ -280,6 +293,7 @@ void nq_session_init(struct nq_session *session, bool is_gp)
 	session->state = NQ_NOTIF_IDLE;
 	session->cpu_clk = 0;
 	session->is_gp = is_gp;
+	session->notif_count = 0;
 }
 
 bool nq_session_is_gp(const struct nq_session *session)
@@ -352,6 +366,7 @@ static ssize_t debug_smclog_read(struct file *file, char __user *user_buf,
 static const struct file_operations mc_debug_smclog_ops = {
 	.read = debug_smclog_read,
 	.llseek = default_llseek,
+	.open = debug_generic_open,
 	.release = debug_generic_release,
 };
 
@@ -589,7 +604,7 @@ int nq_start(void)
 		MAX_IW_SESSION * sizeof(struct interworld_session);
 
 	/* First empty N-SIQ to setup of the MCI structure */
-	ret = mc_fc_nsiq();
+	ret = mc_fc_nsiq(0, 0);
 	if (ret)
 		return ret;
 
@@ -610,7 +625,7 @@ int nq_start(void)
 			/* Switch to the TEE to give it more CPU time. */
 			ret = EAGAIN;
 			for (timeslot = 0; timeslot < 10; timeslot++) {
-				int tmp_ret = mc_fc_yield();
+				int tmp_ret = mc_fc_yield(timeslot);
 
 				if (tmp_ret)
 					return tmp_ret;

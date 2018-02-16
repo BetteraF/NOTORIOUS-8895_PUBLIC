@@ -27,7 +27,7 @@
  *
  * <<Broadcom-WL-IPTag/Open:>>
  *
- * $Id: dhd.h 696007 2017-04-25 04:30:05Z $
+ * $Id: dhd.h 736671 2017-12-18 05:40:38Z $
  */
 
 /****************
@@ -218,19 +218,6 @@ enum dhd_bus_state {
 #define DHD_BUS_CHECK_DOWN_OR_DOWN_IN_PROGRESS(dhdp) \
 		((dhdp)->busstate == DHD_BUS_DOWN || (dhdp)->busstate == DHD_BUS_DOWN_IN_PROGRESS)
 
-/* Macro to print Ethernet Address as String
- * expects both arguements as (char *)
- */
-#define DHD_MAC_TO_STR(mac, str) (snprintf(str, ETHER_ADDR_STR_LEN, \
-					"%02x:%02x:%02x:%02x:%02x:%02x\n", \
-					(uchar)mac[0]&0xff, \
-					(uchar)mac[1]&0xff, \
-					(uchar)mac[2]&0xff, \
-					(uchar)mac[3]&0xff, \
-					(uchar)mac[4]&0xff, \
-					(uchar)mac[5]&0xff))
-
-
 /* Download Types */
 typedef enum download_type {
 	FW,
@@ -304,7 +291,7 @@ enum dhd_op_flags {
 #if defined(CUSTOMER_HW4) && defined(PLATFORM_SLP)
 #define CONFIG_BCMDHD_CLM_PATH "/lib/firmware/bcmdhd_clm.blob"
 #else
-#define CONFIG_BCMDHD_CLM_PATH "/system/etc/wifi/bcmdhd_clm.blob"
+#define CONFIG_BCMDHD_CLM_PATH "/etc/wifi/bcmdhd_clm.blob"
 #endif /* CUSTOMER_HW4 && PLATFORM_SLP */
 #endif /* CONFIG_BCMDHD_CLM_PATH */
 #define WL_CCODE_NULL_COUNTRY  "#n"
@@ -365,7 +352,9 @@ enum dhd_prealloc_index {
 	DHD_PREALLOC_PKTID_MAP = 13,
 	DHD_PREALLOC_PKTID_MAP_IOCTL = 14,
 	DHD_PREALLOC_DHD_LOG_DUMP_BUF = 15,
-	DHD_PREALLOC_DHD_LOG_DUMP_BUF_EX = 16
+	DHD_PREALLOC_DHD_LOG_DUMP_BUF_EX = 16,
+	DHD_PREALLOC_DHD_PKTLOG_DUMP_BUF = 17,
+	DHD_PREALLOC_STAT_REPORT_BUF = 18
 };
 
 enum dhd_dongledump_mode {
@@ -398,6 +387,9 @@ enum dhd_dongledump_type {
 	DUMP_TYPE_RESUMED_UNKNOWN,
 	DUMP_TYPE_TRANS_ID_MISMATCH,
 	DUMP_TYPE_HANG_ON_IFACE_OP_FAIL,
+#ifdef DEBUG_DNGL_INIT_FAIL
+	DUMP_TYPE_DONGLE_INIT_FAILURE,
+#endif /* DEBUG_DNGL_INIT_FAIL */
 #ifdef SUPPORT_LINKDOWN_RECOVERY
 	DUMP_TYPE_READ_SHM_FAIL
 #endif /* SUPPORT_LINKDOWN_RECOVERY */
@@ -416,8 +408,11 @@ enum dhd_hang_reason {
 	HANG_REASON_PCIE_PKTID_ERROR = 0x800A,
 	HANG_REASON_PCIE_LINK_DOWN = 0x8805,
 	HANG_REASON_INVALID_EVENT_OR_DATA = 0x8806,
-	HANG_REASON_MAX = 0x8807
+	HANG_REASON_UNKNOWN = 0x8807,
+	HANG_REASON_MAX = 0x8808
 };
+
+#define WLC_E_DEAUTH_MAX_REASON 0x0FFF
 
 enum dhd_rsdb_scan_features {
 	/* Downgraded scan feature for AP active */
@@ -491,8 +486,6 @@ enum {
 #ifdef BCMSDIO
 #define TCPACK_SUP_DEFAULT	TCPACK_SUP_DELAYTX
 #elif defined(BCMPCIE)
-#define TCPACK_SUP_DEFAULT	TCPACK_SUP_HOLD
-#else
 #define TCPACK_SUP_DEFAULT	TCPACK_SUP_OFF
 #endif /* BCMSDIO */
 #endif /* ARGOS_CPU_SCHEDULER */
@@ -602,7 +595,9 @@ extern char *dhd_log_dump_get_timestamp(void);
 #endif /* DHD_LOG_DUMP */
 
 #if defined(CUSTOMER_HW4)
-#define DHD_COMMON_DUMP_PATH	"/data/media/wifi/log/"
+#ifndef DHD_COMMON_DUMP_PATH
+#define DHD_COMMON_DUMP_PATH	"/data/log/wifi/"
+#endif /* !DHD_COMMON_DUMP_PATH */
 #else
 #define DHD_COMMON_DUMP_PATH	"/installmedia/"
 #endif /* CUSTOMER_HW4 */
@@ -840,6 +835,9 @@ typedef struct dhd_pub {
 #if defined(DHD_HANG_SEND_UP_TEST)
 	uint req_hang_type;
 #endif /* DHD_HANG_SEND_UP_TEST */
+#if defined(CONFIG_BCM_DETECT_CONSECUTIVE_HANG)
+	uint hang_counts;
+#endif /* CONFIG_BCM_DETECT_CONSECUTIVE_HANG */
 #ifdef WLTDLS
 	bool tdls_enable;
 #endif
@@ -981,9 +979,9 @@ typedef struct dhd_pub {
 	/* timesync link */
 	struct dhd_ts *ts;
 	bool	d2h_hostrdy_supported;
-#ifdef DBG_PKT_MON
+#if defined(DBG_PKT_MON) || defined(DHD_PKT_LOGGING)
 	bool d11_tx_status;
-#endif /* DBG_PKT_MON */
+#endif /* DBG_PKT_MON || DHD_PKT_LOGGING */
 	uint16 ndo_version;		/* ND offload version supported */
 #ifdef NDO_CONFIG_SUPPORT
 	bool ndo_enable;		/* ND offload feature enable */
@@ -1029,6 +1027,12 @@ typedef struct dhd_pub {
 #endif /* WLADPS_SEAK_AP_WAR */
 	bool ext_trap_data_supported;
 	uint32 *extended_trap_data;
+#ifdef DHD_PKT_LOGGING
+	struct dhd_pktlog *pktlog;
+#endif /* DHD_PKT_LOGGING */
+#if defined(STAT_REPORT)
+	void *stat_report_info;
+#endif
 } dhd_pub_t;
 
 typedef struct {
@@ -1378,7 +1382,8 @@ typedef enum dhd_attach_states
 	DHD_ATTACH_STATE_EARLYSUSPEND_DONE = 0x100,
 	DHD_ATTACH_TIMESYNC_ATTACH_DONE = 0x200,
 	DHD_ATTACH_LOGTRACE_INIT = 0x400,
-	DHD_ATTACH_STATE_DONE = 0x800
+	DHD_ATTACH_STATE_LB_ATTACH_DONE = 0x800,
+	DHD_ATTACH_STATE_DONE = 0x1000
 } dhd_attach_states_t;
 
 /* Value -1 means we are unsuccessful in creating the kthread. */
@@ -1416,13 +1421,7 @@ extern void dhd_store_conn_status(uint32 event, uint32 status, uint32 reason);
 
 extern bool dhd_prec_enq(dhd_pub_t *dhdp, struct pktq *q, void *pkt, int prec);
 
-#ifdef DHD_WAKE_STATUS
-/* Receive frame for delivery to OS.  Callee disposes of rxp. */
-extern void dhd_rx_frame(dhd_pub_t *dhdp, int ifidx, void *rxp, int numpkt, uint8 chan,
-	int pkt_wake, wake_counts_t *wcp);
-#else
 extern void dhd_rx_frame(dhd_pub_t *dhdp, int ifidx, void *rxp, int numpkt, uint8 chan);
-#endif /* DHD_WAKE_STATUS */
 
 /* Return pointer to interface name */
 extern char *dhd_ifname(dhd_pub_t *dhdp, int idx);
@@ -1591,8 +1590,11 @@ void dhd_schedule_sssr_dump(dhd_pub_t *dhdp);
 #define DHD_ARP_FILTER_NUM		5
 #define DHD_BROADCAST_ARP_FILTER_NUM	6
 #define DHD_IP4BCAST_DROP_FILTER_NUM	7
+#define DHD_CISCO_STP_DROP_FILTER_NUM	8
+#define DHD_CISCO_XID_DROP_FILTER_NUM	9
 #define DISCARD_IPV4_MCAST	"102 1 6 IP4_H:16 0xf0 0xe0"
 #define DISCARD_IPV6_MCAST	"103 1 6 IP6_H:24 0xff 0xff"
+#define DISCARD_IPV4_BCAST	"107 1 6 IP4_H:16 0xffffffff 0xffffffff"
 extern int dhd_os_enable_packet_filter(dhd_pub_t *dhdp, int val);
 extern void dhd_enable_packet_filter(int value, dhd_pub_t *dhd);
 extern int dhd_packet_filter_add_remove(dhd_pub_t *dhdp, int add_remove, int num);
@@ -1652,6 +1654,30 @@ typedef struct {
 	uint32 rom_rodata_end;
 } dhd_event_log_t;
 #endif /* SHOW_LOGTRACE */
+
+#if defined(DHD_NON_DMA_M2M_CORRUPTION)
+#define PCIE_DMAXFER_LPBK_LENGTH	4096
+typedef struct dhd_pcie_dmaxfer_lpbk {
+	union {
+		uint32	length;
+		uint32	status;
+	} u;
+	uint32	srcdelay;
+	uint32	destdelay;
+	uint32	lpbkmode;
+	uint32	wait;
+	uint32	core;
+} dhd_pcie_dmaxfer_lpbk_t;
+#endif /* DHD_NON_DMA_M2M_CORRUPTION */
+enum d11_lpbk_type {
+	M2M_DMA_LPBK = 0,
+	D11_LPBK = 1,
+	BMC_LPBK = 2,
+	M2M_NON_DMA_LPBK = 3,
+	D11_HOST_MEM_LPBK = 4,
+	BMC_HOST_MEM_LPBK = 5,
+	MAX_LPBK = 6
+};
 
 #ifdef KEEP_ALIVE
 extern int dhd_dev_start_mkeep_alive(dhd_pub_t *dhd_pub, uint8 mkeep_alive_id, uint8 *ip_pkt,
@@ -1742,6 +1768,7 @@ extern uint dhd_bus_chip_id(dhd_pub_t *dhdp);
 extern uint dhd_bus_chiprev_id(dhd_pub_t *dhdp);
 extern uint dhd_bus_chippkg_id(dhd_pub_t *dhdp);
 #endif /* defined(BCMSDIO) || defined(BCMPCIE) */
+int dhd_bus_get_fw_mode(dhd_pub_t *dhdp);
 
 #if defined(KEEP_ALIVE)
 extern int dhd_keep_alive_onoff(dhd_pub_t *dhd);
@@ -1772,6 +1799,8 @@ extern int dhd_os_busbusy_wait_condition(dhd_pub_t *pub, uint *var, uint conditi
 extern int dhd_os_busbusy_wait_negation(dhd_pub_t * pub, uint * condition);
 extern int dhd_os_d3ack_wait(dhd_pub_t * pub, uint * condition);
 extern int dhd_os_d3ack_wake(dhd_pub_t * pub);
+extern int dhd_os_dmaxfer_wait(dhd_pub_t *pub, uint *condition);
+extern int dhd_os_dmaxfer_wake(dhd_pub_t *pub);
 
 /*
  * Manage sta objects in an interface. Interface is identified by an ifindex and
@@ -1789,7 +1818,8 @@ extern int dhd_bssidx2idx(dhd_pub_t *dhdp, uint32 bssidx);
 extern struct net_device *dhd_linux_get_primary_netdev(dhd_pub_t *dhdp);
 
 extern bool dhd_is_concurrent_mode(dhd_pub_t *dhd);
-extern int dhd_iovar(dhd_pub_t *pub, int ifidx, char *name, char *cmd_buf, uint cmd_len, int set);
+int dhd_iovar(dhd_pub_t *pub, int ifidx, char *name, char *param_buf, uint param_len,
+		char *res_buf, uint res_len, int set);
 extern int dhd_getiovar(dhd_pub_t *pub, int ifidx, char *name, char *cmd_buf,
 		uint cmd_len, char **resptr, uint resp_len);
 
@@ -2018,6 +2048,19 @@ extern uint dhd_pktgen_len;
 extern char fw_path2[MOD_PARAM_PATHLEN];
 #endif
 
+#if defined(ANDROID_PLATFORM_VERSION)
+#if (ANDROID_PLATFORM_VERSION < 7)
+#define DHD_LEGACY_FILE_PATH
+#define VENDOR_PATH "/system"
+#elif (ANDROID_PLATFORM_VERSION == 7)
+#define VENDOR_PATH "/system"
+#elif (ANDROID_PLATFORM_VERSION >= 8)
+#define VENDOR_PATH "/vendor"
+#endif /* ANDROID_PLATFORM_VERSION < 7 */
+#else
+#define VENDOR_PATH ""
+#endif /* ANDROID_PLATFORM_VERSION */
+
 #ifdef DHD_LEGACY_FILE_PATH
 #define PLATFORM_PATH	"/data/"
 #elif defined(PLATFORM_SLP)
@@ -2242,6 +2285,12 @@ extern void dhd_os_general_spin_unlock(dhd_pub_t *pub, unsigned long flags);
 #define DHD_TDLS_UNLOCK(lock, flags)     dhd_os_spin_unlock((lock), (flags))
 #endif /* WLTDLS */
 
+#ifdef DBG_PKT_MON
+/* Enable DHD PKT MON spin lock/unlock */
+#define DHD_PKT_MON_LOCK(lock, flags)     (flags) = dhd_os_spin_lock(lock)
+#define DHD_PKT_MON_UNLOCK(lock, flags)   dhd_os_spin_unlock(lock, (flags))
+#endif /* DBG_PKT_MON */
+
 #define DHD_LINUX_GENERAL_LOCK(dhdp, flags)	DHD_GENERAL_LOCK(dhdp, flags)
 #define DHD_LINUX_GENERAL_UNLOCK(dhdp, flags)	DHD_GENERAL_UNLOCK(dhdp, flags)
 
@@ -2379,6 +2428,9 @@ extern void dhd_lb_stats_rxc_percpu_cnt_incr(dhd_pub_t *dhdp);
 #define DHD_LB_STATS_TXC_PERCPU_CNT_INCR(dhdp) DHD_LB_STATS_NOOP
 #define DHD_LB_STATS_RXC_PERCPU_CNT_INCR(dhdp) DHD_LB_STATS_NOOP
 #endif /* !DHD_LB_STATS */
+#ifdef DHD_LB_IRQSET
+extern void dhd_irq_set_affinity(dhd_pub_t *dhdp);
+#endif /* DHD_LB_IRQSET */
 
 #ifdef DHD_SSSR_DUMP
 #define DHD_SSSR_MEMPOOL_SIZE	(1024 * 1024) /* 1MB size */
@@ -2513,6 +2565,8 @@ int dhd_send_msg_to_daemon(struct sk_buff *skb, void *data, int size);
 void dhd_send_trap_to_fw_for_timeout(dhd_pub_t * pub, timeout_reasons_t reason);
 #endif
 
+extern void dhd_prhex(const char *msg, volatile uchar *buf, uint nbytes, uint8 dbg_level);
+
 #if defined(CONFIG_64BIT)
 #define DHD_SUPPORT_64BIT
 #elif defined(DHD_EFI)
@@ -2532,4 +2586,11 @@ extern void dhd_make_hang_with_reason(struct net_device *dev, const char *string
 extern void dhd_set_blob_support(dhd_pub_t *dhdp, char *fw_path);
 #endif /* DHD_BLOB_EXISTENCE_CHECK */
 
+#ifdef DHD_WAKE_STATUS
+wake_counts_t* dhd_get_wakecount(dhd_pub_t *dhdp);
+#endif /* DHD_WAKE_STATUS */
+
+#ifdef BCM_ASLR_HEAP
+extern uint32 dhd_get_random_number(void);
+#endif /* BCM_ASLR_HEAP */
 #endif /* _dhd_h_ */

@@ -419,7 +419,6 @@ static void watchdog_overflow_callback(struct perf_event *event,
 	 */
 	if (is_hardlockup()) {
 		int this_cpu = smp_processor_id();
-		struct pt_regs *regs = get_irq_regs();
 
 		/* only print hardlockups once */
 		if (__this_cpu_read(hard_watchdog_warn) == true)
@@ -576,7 +575,7 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
 		if (softlockup_panic) {
 #ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
 			if (regs) {
-				sec_debug_set_extra_info_fault(-1, regs);
+				sec_debug_set_extra_info_fault(WATCHDOG_FAULT, (unsigned long)regs->pc, regs);
 				sec_debug_set_extra_info_backtrace(regs);
 			}
 #endif

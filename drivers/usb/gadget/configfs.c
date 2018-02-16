@@ -355,7 +355,6 @@ static ssize_t gadget_dev_desc_UDC_store(struct config_item *item,
 		ret = unregister_gadget(gi);
 		if (ret)
 			goto err;
-		/* prevent memory leak */
 		kfree(name);
 	} else {
 		if (gi->udc_name) {
@@ -1569,7 +1568,7 @@ static void android_work(struct work_struct *data)
 	}
 
 	if (!uevent_sent) {
-		pr_info("%s: did not send uevent (%d %d %p)\n", __func__,
+		pr_info("%s: did not send uevent (%d %d %pK)\n", __func__,
 			gi->connected, gi->sw_connected, cdev->config);
 	}
 }
@@ -1918,6 +1917,7 @@ static ssize_t enable_store(struct device *pdev, struct device_attribute *attr,
 
 		if (!gadget) {
 			pr_info("usb: %s: Gadget is NULL: %p\n", __func__, gadget);
+			mutex_unlock(&dev->lock);
 			return -ENODEV;
 		}
 

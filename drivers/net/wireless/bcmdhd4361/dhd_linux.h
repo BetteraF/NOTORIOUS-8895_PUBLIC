@@ -24,7 +24,7 @@
  *
  * <<Broadcom-WL-IPTag/Open:>>
  *
- * $Id: dhd_linux.h 675385 2016-12-15 13:37:08Z $
+ * $Id: dhd_linux.h 733907 2017-11-30 12:20:38Z $
  */
 
 /* wifi platform functions for power, interrupt and pre-alloc, either
@@ -143,4 +143,7 @@ typedef struct bcm_iov_buf {
 
 int dhd_enable_adps(dhd_pub_t *dhd, uint8 on);
 #endif /* WLADPS || WLADPS_PRIVATE_CMD */
+#ifdef DHD_DISABLE_VHTMODE
+void dhd_disable_vhtmode(dhd_pub_t *dhd);
+#endif /* DHD_DISABLE_VHTMODE */
 #endif /* __DHD_LINUX_H__ */

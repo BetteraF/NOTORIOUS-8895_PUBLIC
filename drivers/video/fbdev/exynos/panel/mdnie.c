@@ -25,9 +25,6 @@
 #include "panel_drv.h"
 #include "mdnie.h"
 #include "copr.h"
-#ifdef CONFIG_EXYNOS_DECON_LCD_TUNING
-#include "tuning.h"
-#endif
 #ifdef CONFIG_DISPLAY_USE_INFO
 #include "dpui.h"
 #endif
@@ -75,6 +72,8 @@ static const char * const mdnie_maptbl_name[] = {
 	[MDNIE_NIGHT_MAPTBL] = "night",
 	/* LIGHT_NOTIFICATION */
 	[MDNIE_LIGHT_NOTIFICATION_MAPTBL] = "light_notification",
+	/* COLOR_LENS */
+	[MDNIE_COLOR_LENS_MAPTBL] = "color_lens",
 };
 
 static const char * const scr_white_mode_name[] = {
@@ -89,6 +88,7 @@ static const char * const mdnie_mode_name[] = {
 	[MDNIE_BYPASS_MODE] = "bypass",
 	[MDNIE_LIGHT_NOTIFICATION_MODE] = "light_notification",
 	[MDNIE_ACCESSIBILITY_MODE] = "accessibility",
+	[MDNIE_COLOR_LENS_MODE] = "color_lens",
 	[MDNIE_HDR_MODE] = "hdr",
 	[MDNIE_HMD_MODE] = "hmd",
 	[MDNIE_NIGHT_MODE] = "night",
@@ -143,6 +143,8 @@ int mdnie_current_state(struct mdnie_info *mdnie)
 		return MDNIE_LIGHT_NOTIFICATION_MODE;
 	if (IS_ACCESSIBILITY_MODE(mdnie))
 		return MDNIE_ACCESSIBILITY_MODE;
+	if (IS_COLOR_LENS_MODE(mdnie))
+		return MDNIE_COLOR_LENS_MODE;
 	if (IS_HDR_MODE(mdnie))
 		return MDNIE_HDR_MODE;
 	if (IS_HMD_MODE(mdnie))
@@ -174,6 +176,9 @@ int mdnie_get_maptbl_index(struct mdnie_info *mdnie)
 		break;
 	case MDNIE_ACCESSIBILITY_MODE:
 		index = MAPTBL_IDX_ACCESSIBILITY(mdnie->props.accessibility);
+		break;
+	case MDNIE_COLOR_LENS_MODE:
+		index = MDNIE_COLOR_LENS_MAPTBL;
 		break;
 	case MDNIE_HDR_MODE:
 		index = MDNIE_HDR_MAPTBL;
@@ -343,14 +348,13 @@ static void mdnie_coordinate_tune_rgb(struct mdnie_info *mdnie, int x, int y, u8
 
 	area = mdnie_coordinate_area(mdnie, x, y);
 
-	if (((x - 2991) * (x - 2991) + (y - 3148) * (y - 3148)) <= 225) {
+	if (((x - mdnie->props.cal_x_center) * (x - mdnie->props.cal_x_center) + (y - mdnie->props.cal_y_center) * (y - mdnie->props.cal_y_center)) <= mdnie->props.cal_boundary_center) {
 		tune_x = 0;
-		tune_y = 0;		
-	}
-	else {
+		tune_y = 0;
+	} else {
 		tune_x = mdnie_coordinate_tune_x(mdnie, x, y);
 		tune_y = mdnie_coordinate_tune_y(mdnie, x, y);
-	}	
+	}
 
 	for (i = 0; i < MAX_CAL_LINE; i++)
 		result[i] = COLOR_OFFSET_FUNC(x, y,
@@ -399,15 +403,6 @@ static int panel_set_mdnie(struct panel_device *panel)
 	if (!IS_PANEL_ACTIVE(panel))
 		return 0;
 
-#ifdef CONFIG_EXYNOS_DECON_LCD_TUNING
-	if (mdnie->props.tuning) {
-		pr_info("%s, do tuning-seq\n", __func__);
-		ret = tfile_do_seqtbl(panel, mdnie->props.tfilepath);
-		if (unlikely(ret < 0))
-			pr_err("%s, failed to write tuning seqtbl\n", __func__);
-		goto set_mdnie_exit;
-	}
-#endif
 	pr_info("%s, do mdnie-seq\n", __func__);
 
 	ret = 0;
@@ -416,7 +411,6 @@ static int panel_set_mdnie(struct panel_device *panel)
 	if (unlikely(ret < 0))
 		pr_err("%s, failed to write seqtbl\n", __func__);
 
-set_mdnie_exit:
 	mutex_unlock(&panel->op_lock);
 
 	return ret;
@@ -465,7 +459,7 @@ static void mdnie_update_scr_white_mode(struct mdnie_info *mdnie)
 				 mdnie->props.scenario == EBOOK_MODE)) {
 			mdnie->props.scr_white_mode = SCR_WHITE_MODE_SENSOR_RGB;
 			mdnie->props.update_sensorRGB = false;
-		} else if (mdnie->props.scenario <= EMAIL_MODE &&
+		} else if (mdnie->props.scenario <= SCENARIO_MAX &&
 				mdnie->props.scenario != EBOOK_MODE) {
 			mdnie->props.scr_white_mode =
 				SCR_WHITE_MODE_COLOR_COORDINATE;
@@ -625,71 +619,6 @@ static ssize_t scenario_store(struct device *dev,
 	return count;
 }
 
-#ifdef CONFIG_EXYNOS_DECON_LCD_TUNING
-static ssize_t tuning_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct mdnie_info *mdnie = dev_get_drvdata(dev);
-	char *pos = buf;
-
-	pos += sprintf(pos, "++ %s: %s\n", __func__, mdnie->props.tfilepath);
-
-	if (!mdnie->props.tuning) {
-		pos += sprintf(pos, "tunning mode is off\n");
-		goto exit;
-	}
-
-	if (strncmp(mdnie->props.tfilepath, MDNIE_SYSFS_PREFIX,
-				sizeof(MDNIE_SYSFS_PREFIX) - 1)) {
-		pos += sprintf(pos, "file path is invalid, %s\n", mdnie->props.tfilepath);
-		goto exit;
-	}
-
-exit:
-	pos += sprintf(pos, "-- %s\n", __func__);
-
-	return pos - buf;
-}
-
-
-static ssize_t tuning_store(struct device *dev,
-		struct device_attribute *attr, const char *buf, size_t count)
-{
-	struct mdnie_info *mdnie = dev_get_drvdata(dev);
-	unsigned int value;
-	int ret;
-
-	if (sysfs_streq(buf, "0") || sysfs_streq(buf, "1")) {
-		ret = kstrtouint(buf, 0, &value);
-		if (ret < 0)
-			return ret;
-
-		mdnie->props.tuning = !!value;
-		if (!value)
-			memset(mdnie->props.tfilepath, 0, sizeof(mdnie->props.tfilepath));
-		dev_info(dev, "%s: %s\n", __func__, mdnie->props.tuning ? "enable" : "disable");
-	} else {
-		if (!mdnie->props.tuning)
-			return count;
-
-		if (count > (sizeof(mdnie->props.tfilepath) - sizeof(MDNIE_SYSFS_PREFIX))) {
-			dev_err(dev, "filename %s is too long\n", mdnie->props.tfilepath);
-			return -ENOMEM;
-		}
-
-		mutex_lock(&mdnie->lock);
-		memset(mdnie->props.tfilepath, 0, sizeof(mdnie->props.tfilepath));
-		snprintf(mdnie->props.tfilepath, sizeof(MDNIE_SYSFS_PREFIX) + count - 1, "%s%s", MDNIE_SYSFS_PREFIX, buf);
-		mutex_unlock(&mdnie->lock);
-		dev_info(dev, "%s: %s\n", __func__, mdnie->props.tfilepath);
-
-		mdnie_update(mdnie);
-	}
-
-	return count;
-}
-#endif /* CONFIG_EXYNOS_DECON_LCD_TUNING */
-
 static ssize_t accessibility_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
@@ -703,7 +632,8 @@ static ssize_t accessibility_store(struct device *dev,
 {
 	struct mdnie_info *mdnie = dev_get_drvdata(dev);
 	unsigned int s[12] = {0, };
-	int i, value, ret;
+	unsigned int value;
+	int i, ret;
 
 	ret = sscanf(buf, "%d %x %x %x %x %x %x %x %x %x %x %x %x",
 		&value, &s[0], &s[1], &s[2], &s[3],
@@ -729,7 +659,7 @@ static ssize_t accessibility_store(struct device *dev,
 			mdnie->props.scr[i * 2 + 0] = GET_LSB_8BIT(s[i]);
 			mdnie->props.scr[i * 2 + 1] = GET_MSB_8BIT(s[i]);
 		}
-		mdnie->props.sz_scr = ret - 1;
+		mdnie->props.sz_scr = (ret - 1) * 2;
 		mdnie_maptbl_init(mdnie,
 			MAPTBL_IDX_ACCESSIBILITY(mdnie->props.accessibility));
 	}
@@ -812,62 +742,62 @@ static ssize_t mdnie_show(struct device *dev,
 	struct mdnie_info *mdnie = dev_get_drvdata(dev);
 	int maptbl_index = mdnie_get_maptbl_index(mdnie);
 	int i, mdnie_mode = mdnie_current_state(mdnie);
-	char *p = buf;
+	unsigned int len = 0;
 
 	if (!IS_MDNIE_ENABLED(mdnie)) {
 		dev_err(mdnie->dev, "mdnie state is off\n");
 		return -EINVAL;
 	}
 
-	p += sprintf(p, "mdnie %s-mode, maptbl %s(%d)\n",
+	len += scnprintf(buf + len, PAGE_SIZE - len, "mdnie %s-mode, maptbl %s(%d)\n",
 			mdnie_mode_name[mdnie_mode], (maptbl_index < 0) ?
 			"invalid" : mdnie_maptbl_name[maptbl_index], maptbl_index);
-	p += sprintf(p, "accessibility %s(%d), hdr %d, hmd %d, hbm %d\n",
+	len += scnprintf(buf + len, PAGE_SIZE - len, "accessibility %s(%d), hdr %d, hmd %d, hbm %d\n",
 			accessibility_name[mdnie->props.accessibility],
 			mdnie->props.accessibility, mdnie->props.hdr,
 			mdnie->props.hmd, mdnie->props.hbm);
-	p += sprintf(p, "scenario %s(%d), mode %s(%d)\n",
+	len += scnprintf(buf + len, PAGE_SIZE - len, "scenario %s(%d), mode %s(%d)\n",
 			scenario_name[mdnie->props.scenario], mdnie->props.scenario,
 			scenario_mode_name[mdnie->props.mode], mdnie->props.mode);
-	p += sprintf(p, "scr_white_mode %s\n",
+	len += scnprintf(buf + len, PAGE_SIZE - len, "scr_white_mode %s\n",
 			scr_white_mode_name[mdnie->props.scr_white_mode]);
-	p += sprintf(p, "mdnie_ldu %d, coord x %d, y %d area Q%d\n",
+	len += scnprintf(buf + len, PAGE_SIZE - len, "mdnie_ldu %d, coord x %d, y %d area Q%d\n",
 			mdnie->props.ldu, mdnie->props.wcrd_x, mdnie->props.wcrd_y,
 			mdnie_coordinate_area(mdnie, mdnie->props.wcrd_x, mdnie->props.wcrd_y) + 1);
-	p += sprintf(p, "coord_wrgb[adpt] r:%d(%02X) g:%d(%02X) b:%d(%02X)\n",
+	len += scnprintf(buf + len, PAGE_SIZE - len, "coord_wrgb[adpt] r:%d(%02X) g:%d(%02X) b:%d(%02X)\n",
 			mdnie->props.coord_wrgb[WCRD_TYPE_ADAPTIVE][0], mdnie->props.coord_wrgb[WCRD_TYPE_ADAPTIVE][0],
 			mdnie->props.coord_wrgb[WCRD_TYPE_ADAPTIVE][1], mdnie->props.coord_wrgb[WCRD_TYPE_ADAPTIVE][1],
 			mdnie->props.coord_wrgb[WCRD_TYPE_ADAPTIVE][2], mdnie->props.coord_wrgb[WCRD_TYPE_ADAPTIVE][2]);
-	p += sprintf(p, "coord_wrgb[d65] r:%d(%02X) g:%d(%02X) b:%d(%02X)\n",
+	len += scnprintf(buf + len, PAGE_SIZE - len, "coord_wrgb[d65] r:%d(%02X) g:%d(%02X) b:%d(%02X)\n",
 			mdnie->props.coord_wrgb[WCRD_TYPE_D65][0], mdnie->props.coord_wrgb[WCRD_TYPE_D65][0],
 			mdnie->props.coord_wrgb[WCRD_TYPE_D65][1], mdnie->props.coord_wrgb[WCRD_TYPE_D65][1],
 			mdnie->props.coord_wrgb[WCRD_TYPE_D65][2], mdnie->props.coord_wrgb[WCRD_TYPE_D65][2]);
-	p += sprintf(p, "cur_wrgb r:%d(%02X) g:%d(%02X) b:%d(%02X)\n",
+	len += scnprintf(buf + len, PAGE_SIZE - len, "cur_wrgb r:%d(%02X) g:%d(%02X) b:%d(%02X)\n",
 			mdnie->props.cur_wrgb[0], mdnie->props.cur_wrgb[0],
 			mdnie->props.cur_wrgb[1], mdnie->props.cur_wrgb[1],
 			mdnie->props.cur_wrgb[2], mdnie->props.cur_wrgb[2]);
-	p += sprintf(p, "ssr_wrgb r:%d(%02X) g:%d(%02X) b:%d(%02X)\n",
+	len += scnprintf(buf + len, PAGE_SIZE - len, "ssr_wrgb r:%d(%02X) g:%d(%02X) b:%d(%02X)\n",
 			mdnie->props.ssr_wrgb[0], mdnie->props.ssr_wrgb[0],
 			mdnie->props.ssr_wrgb[1], mdnie->props.ssr_wrgb[1],
 			mdnie->props.ssr_wrgb[2], mdnie->props.ssr_wrgb[2]);
-	p += sprintf(p, "def_wrgb r:%d(%02X) g:%d(%02X) b:%d(%02X), offset r:%d g:%d b:%d\n",
+	len += scnprintf(buf + len, PAGE_SIZE - len, "def_wrgb r:%d(%02X) g:%d(%02X) b:%d(%02X), offset r:%d g:%d b:%d\n",
 			mdnie->props.def_wrgb[0], mdnie->props.def_wrgb[0],
 			mdnie->props.def_wrgb[1], mdnie->props.def_wrgb[1],
 			mdnie->props.def_wrgb[2], mdnie->props.def_wrgb[2],
 			mdnie->props.def_wrgb_ofs[0], mdnie->props.def_wrgb_ofs[1],
 			mdnie->props.def_wrgb_ofs[2]);
 
-	p += sprintf(p, "scr : ");
+	len += scnprintf(buf + len, PAGE_SIZE - len, "scr : ");
 	if (mdnie->props.sz_scr) {
 		for (i = 0; i < mdnie->props.sz_scr; i++)
-			p += sprintf(p, "%02x ", mdnie->props.scr[i]);
+			len += scnprintf(buf + len, PAGE_SIZE - len, "%02x ", mdnie->props.scr[i]);
 	} else {
-		p += sprintf(p, "none");
+		len += scnprintf(buf + len, PAGE_SIZE - len, "none");
 	}
-	p += sprintf(p, "\n");
+	len += scnprintf(buf + len, PAGE_SIZE - len, "\n");
 
 
-	p += sprintf(p, "night_mode %s, level %d\n",
+	len += scnprintf(buf + len, PAGE_SIZE - len, "night_mode %s, level %d\n",
 			mdnie->props.night ? "on" : "off",
 			mdnie->props.night_level);
 
@@ -875,7 +805,7 @@ static ssize_t mdnie_show(struct device *dev,
 	mdnie_coordinate_tune_test(mdnie);
 #endif
 
-	return (p - buf);
+	return len;
 }
 
 static ssize_t sensorRGB_show(struct device *dev,
@@ -998,6 +928,49 @@ static ssize_t night_mode_store(struct device *dev,
 
 	return count;
 }
+
+static ssize_t color_lens_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct mdnie_info *mdnie = dev_get_drvdata(dev);
+
+	return sprintf(buf, "%d %d %d\n", mdnie->props.color_lens, mdnie->props.color_lens_color, mdnie->props.color_lens_level);
+}
+
+static ssize_t color_lens_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct mdnie_info *mdnie = dev_get_drvdata(dev);
+	int enable, level, color, ret;
+
+	ret = sscanf(buf, "%d %d %d", &enable, &color, &level);
+
+	dev_info(dev, "%s: color_lens_mode %s color %d level %d\n",
+			__func__, enable ? "on" : "off", color, level);
+
+	if (ret < 0)
+		return ret;
+
+	if (color < 0 || color >= COLOR_LENS_COLOR_MAX)
+		return -EINVAL;
+
+	if (level < 0 || level >= COLOR_LENS_LEVEL_MAX)
+		return -EINVAL;
+
+	mutex_lock(&mdnie->lock);
+	mdnie->props.color_lens = !!enable;
+	mdnie->props.color_lens_color = color;
+	mdnie->props.color_lens_level = level;
+	if (enable) {
+		/* MDNIE_COLOR_LENS_MAPTBL update using MDNIE_ETC_COLOR_LENS_MAPTBL */
+		mdnie_maptbl_init(mdnie, MDNIE_COLOR_LENS_MAPTBL);
+	}
+	mutex_unlock(&mdnie->lock);
+	mdnie_update(mdnie);
+
+	return count;
+}
+
 
 static ssize_t hdr_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -1138,9 +1111,6 @@ static ssize_t hmt_color_temperature_store(struct device *dev,
 struct device_attribute mdnie_dev_attrs[] = {
 	__PANEL_ATTR_RW(mode, 0664),
 	__PANEL_ATTR_RW(scenario, 0664),
-#ifdef CONFIG_EXYNOS_DECON_LCD_TUNING
-	__PANEL_ATTR_RW(tuning, 0664),
-#endif
 	__PANEL_ATTR_RW(accessibility, 0664),
 	__PANEL_ATTR_RW(bypass, 0664),
 	__PANEL_ATTR_RW(lux, 0000),
@@ -1148,6 +1118,7 @@ struct device_attribute mdnie_dev_attrs[] = {
 	__PANEL_ATTR_RW(sensorRGB, 0664),
 	__PANEL_ATTR_RW(whiteRGB, 0664),
 	__PANEL_ATTR_RW(night_mode, 0664),
+	__PANEL_ATTR_RW(color_lens, 0664),
 	__PANEL_ATTR_RW(hdr, 0664),
 	__PANEL_ATTR_RW(light_notification, 0664),
 	__PANEL_ATTR_RW(mdnie_ldu, 0664),
@@ -1234,6 +1205,69 @@ static int mdnie_register_fb(struct mdnie_info *mdnie)
 }
 
 #ifdef CONFIG_DISPLAY_USE_INFO
+#define MDNIE_WOFS_ORG_PATH ("/efs/FactoryApp/mdnie")
+static int mdnie_get_efs(char *filename, int *value)
+{
+	mm_segment_t old_fs;
+	struct file *filp = NULL;
+	int fsize = 0, nread, rc, ret = 0;
+	u8 buf[128];
+
+	if (!filename || !value) {
+		pr_err("%s invalid parameter\n", __func__);
+		return -EINVAL;
+	}
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+
+	filp = filp_open(filename, O_RDONLY, 0440);
+	if (IS_ERR(filp)) {
+		ret = PTR_ERR(filp);
+		if (ret == -ENOENT)
+			pr_err("%s file(%s) not exist\n", __func__, filename);
+		else
+			pr_info("%s file(%s) open error(ret %d)\n",
+					__func__, filename, ret);
+		set_fs(old_fs);
+		return -ENOENT;
+	}
+
+	if (filp->f_path.dentry && filp->f_path.dentry->d_inode)
+		fsize = filp->f_path.dentry->d_inode->i_size;
+
+	if (fsize == 0 || fsize > ARRAY_SIZE(buf)) {
+		pr_err("%s invalid file(%s) size %d\n",
+				__func__, filename, fsize);
+		ret = -EEXIST;
+		goto exit;
+	}
+
+	memset(buf, 0, sizeof(buf));
+	nread = vfs_read(filp, (char __user *)buf, fsize, &filp->f_pos);
+	if (nread != fsize) {
+		pr_err("%s failed to read (ret %d)\n", __func__, nread);
+		ret = -EIO;
+		goto exit;
+	}
+
+	rc = sscanf(buf, "%d %d %d", &value[0], &value[1], &value[2]);
+	if (rc != 3) {
+		pr_err("%s failed to kstrtoint %d\n", __func__, rc);
+		ret = -EINVAL;
+		goto exit;
+	}
+
+	pr_info("%s %s(size %d) : %d %d %d\n",
+			__func__, filename, fsize, value[0], value[1], value[2]);
+
+exit:
+	filp_close(filp, current->files);
+	set_fs(old_fs);
+
+	return ret;
+}
+
 static int dpui_notifier_callback(struct notifier_block *self,
 				 unsigned long event, void *data)
 {
@@ -1242,6 +1276,7 @@ static int dpui_notifier_callback(struct notifier_block *self,
 	struct panel_info *panel_data;
 	char tbuf[MAX_DPUI_VAL_LEN];
 	u8 coordinate[PANEL_COORD_LEN] = { 0, };
+	int def_wrgb_ofs_org[3] = { 0, };
 	int size;
 
 	mdnie = container_of(self, struct mdnie_info, dpui_notif);
@@ -1268,6 +1303,15 @@ static int dpui_notifier_callback(struct notifier_block *self,
 			mdnie->props.def_wrgb_ofs[2]);
 	set_dpui_field(DPUI_KEY_WOFS_B, tbuf, size);
 
+	mdnie_get_efs(MDNIE_WOFS_ORG_PATH, def_wrgb_ofs_org);
+
+	size = snprintf(tbuf, MAX_DPUI_VAL_LEN, "%d", def_wrgb_ofs_org[0]);
+	set_dpui_field(DPUI_KEY_WOFS_R_ORG, tbuf, size);
+	size = snprintf(tbuf, MAX_DPUI_VAL_LEN, "%d", def_wrgb_ofs_org[1]);
+	set_dpui_field(DPUI_KEY_WOFS_G_ORG, tbuf, size);
+	size = snprintf(tbuf, MAX_DPUI_VAL_LEN, "%d", def_wrgb_ofs_org[2]);
+	set_dpui_field(DPUI_KEY_WOFS_B_ORG, tbuf, size);
+
 	mutex_unlock(&mdnie->lock);
 
 	return 0;
@@ -1277,7 +1321,7 @@ static int mdnie_register_dpui(struct mdnie_info *mdnie)
 {
 	memset(&mdnie->dpui_notif, 0, sizeof(mdnie->dpui_notif));
 	mdnie->dpui_notif.notifier_call = dpui_notifier_callback;
-	return dpui_logging_register(&mdnie->dpui_notif, DPUI_TYPE_MDNIE);
+	return dpui_logging_register(&mdnie->dpui_notif, DPUI_TYPE_PANEL);
 }
 #endif /* CONFIG_DISPLAY_USE_INFO */
 
@@ -1319,6 +1363,9 @@ int mdnie_probe(struct panel_device *panel, struct mdnie_tune *mdnie_tune)
 	mdnie->props.hmd = HMD_MDNIE_OFF;
 	mdnie->props.night = NIGHT_MODE_OFF;
 	mdnie->props.night_level = NIGHT_LEVEL_6500K;
+	mdnie->props.color_lens = COLOR_LENS_OFF;
+	mdnie->props.color_lens_color = COLOR_LENS_COLOR_BLUE;
+	mdnie->props.color_lens_level = COLOR_LENS_LEVEL_20P;
 	mdnie->props.accessibility = ACCESSIBILITY_OFF;
 	mdnie->props.ldu = LDU_MODE_OFF;
 	mdnie->props.scr_white_mode = SCR_WHITE_MODE_NONE;
@@ -1329,9 +1376,14 @@ int mdnie_probe(struct panel_device *panel, struct mdnie_tune *mdnie_tune)
 
 	mdnie->props.num_ldu_mode = mdnie_tune->num_ldu_mode;
 	mdnie->props.num_night_level = mdnie_tune->num_night_level;
+	mdnie->props.num_color_lens_color = mdnie_tune->num_color_lens_color;
+	mdnie->props.num_color_lens_level = mdnie_tune->num_color_lens_level;
 	memcpy(mdnie->props.line, mdnie_tune->line, sizeof(mdnie->props.line));
 	memcpy(mdnie->props.coef, mdnie_tune->coef, sizeof(mdnie->props.coef));
 	memcpy(mdnie->props.vtx, mdnie_tune->vtx, sizeof(mdnie->props.vtx));
+	mdnie->props.cal_x_center = mdnie_tune->cal_x_center;
+	mdnie->props.cal_y_center = mdnie_tune->cal_y_center;
+	mdnie->props.cal_boundary_center = mdnie_tune->cal_boundary_center;
 
 	mdnie->seqtbl = mdnie_tune->seqtbl;
 	mdnie->nr_seqtbl = mdnie_tune->nr_seqtbl;

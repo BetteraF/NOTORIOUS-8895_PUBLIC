@@ -7,6 +7,7 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/export.h>
+#include <linux/module.h>
 #include <linux/namei.h>
 #include <linux/sched.h>
 #include <linux/writeback.h>
@@ -16,6 +17,9 @@
 #include <linux/quotaops.h>
 #include <linux/backing-dev.h>
 #include "internal.h"
+
+bool fsync_enabled = true;
+module_param(fsync_enabled, bool, 0755);
 
 #define VALID_FLAGS (SYNC_FILE_RANGE_WAIT_BEFORE|SYNC_FILE_RANGE_WRITE| \
 			SYNC_FILE_RANGE_WAIT_AFTER)
@@ -83,16 +87,16 @@ static void do_intr_sync(struct work_struct *work)
 	waiter = sync_work->waiter;
 	spin_unlock(&sync_work->lock);
 
-	dbg_print("\n[intr_sync] %s : call sys_sync on work[%d]-%ld\n",
+	dbg_print("\nintr_sync: %s: call sys_sync on work[%d]-%ld\n",
 			__func__, sync_work->id, sync_work->version);
-	
+
 	/* if no one waits, do not call sync() */
 	if (waiter) {
 		ret = sys_sync();
-		dbg_print("\n[intr_sync] %s : done sys_sync on work[%d]-%ld\n",
+		dbg_print("\nintr_sync: %s: done sys_sync on work[%d]-%ld\n",
 			__func__, sync_work->id, sync_work->version);
 	} else {
-		dbg_print("\n[intr_sync] %s : cancel,no_wait on work[%d]-%ld\n",
+		dbg_print("\nintr_sync: %s: cancel,no_wait on work[%d]-%ld\n",
 			__func__, sync_work->id, sync_work->version);
 	}
 
@@ -104,11 +108,39 @@ static void do_intr_sync(struct work_struct *work)
 	spin_unlock(&sync_work->lock);
 }
 
-static inline  int __check_wakeup_event(void)
+/* wakeup functions that depend on PM facilities
+ *
+ * struct intr_wakeup_data  : wrapper structure for variables for PM
+ *			      each thread has own instance of it
+ * __prepare_wakeup_event() : prepare and check intr_wakeup_data
+ * __check_wakeup_event()   : check wakeup-event with intr_wakeup_data
+ */
+struct intr_wakeup_data {
+	unsigned int cnt;
+};
+
+static inline int __prepare_wakeup_event(struct intr_wakeup_data *wd)
 {
-	if (pm_wakeup_pending())
-		return -EBUSY;
-	return 0;
+	if (pm_get_wakeup_count(&wd->cnt, false))
+		return 0;
+
+	pr_info("intr_sync: detected wakeup events before sync\n");
+	pm_print_active_wakeup_sources();
+	return -EBUSY;
+}
+
+static inline  int __check_wakeup_event(struct intr_wakeup_data *wd)
+{
+	unsigned int cnt, no_inpr;
+
+	no_inpr = pm_get_wakeup_count(&cnt, false);
+	if (no_inpr && (cnt == wd->cnt))
+		return 0;
+
+	pr_info("intr_sync: detected wakeup events(no_inpr: %u cnt: %u->%u)\n",
+		no_inpr, wd->cnt, cnt);
+	pm_print_active_wakeup_sources();
+	return -EBUSY;
 }
 
 /* Interruptible Sync
@@ -135,52 +167,63 @@ enqueue_sync_wait:
 	/* If the workqueue exists, try to enqueue work and wait */
 	if (likely(intr_sync_wq)) {
 		struct interruptible_sync_work *sync_work;
+		struct intr_wakeup_data wd;
 		int work_idx;
 		int work_ver;
-
 find_idle:
 		work_idx = !atomic_read(&running_work_idx);
 		sync_work = &intr_sync_work[work_idx];
 
-		dbg_print("\n[intr_sync] try to wait work[%d]\n", work_idx);
+		/* Prepare intr_wakeup_data and check wakeup event:
+		 * If a wakeup-event is detected, wake up right now
+		 */
+		if (__prepare_wakeup_event(&wd)) {
+			dbg_print("intr_sync: detect wakeup event "
+				"before waiting work[%d]\n", work_idx);
+			return -EBUSY;
+		}
+
+		dbg_print("\nintr_sync: try to wait work[%d]\n", work_idx);
 
 		spin_lock(&sync_work->lock);
 		work_ver = sync_work->version;
 		if (sync_work->state == INTR_SYNC_STATE_RUNNING) {
 			spin_unlock(&sync_work->lock);
-			dbg_print("[intr_sync] work[%d] is already running, "
+			dbg_print("intr_sync: work[%d] is already running, "
 				"find idle work\n", work_idx);
 			goto find_idle;
 		}
 
 		sync_work->waiter++;
 		if (sync_work->state == INTR_SYNC_STATE_IDLE) {
-			dbg_print("[intr_sync] enqueue work[%d]\n", work_idx);
+			dbg_print("intr_sync: enqueue work[%d]\n", work_idx);
 			sync_work->state = INTR_SYNC_STATE_QUEUED;
 			reinit_completion(&sync_work->done);
 			queue_work(intr_sync_wq, &sync_work->work);
 		}
 		spin_unlock(&sync_work->lock);
-		
-		/* Return: 0 if timed out, and positive if completed. */
+
 		do {
-//			dbg_print("[intr_sync] waiting work[%d]\n", work_idx);
+			/* Check wakeup event first before waiting:
+			 * If a wakeup-event is detected, wake up right now
+			 */
+			if  (__check_wakeup_event(&wd)) {
+				spin_lock(&sync_work->lock);
+				sync_work->waiter--;
+				spin_unlock(&sync_work->lock);
+				dbg_print("intr_sync: detect wakeup event "
+					"while waiting work[%d]\n", work_idx);
+				return -EBUSY;
+			}
+
+//			dbg_print("intr_sync: waiting work[%d]\n", work_idx);
+			/* Return 0 if timed out, or positive if completed. */
 			ret = wait_for_completion_io_timeout(
 					&sync_work->done, HZ/10);
 			/* A work that we are waiting for has done. */
 			if ((ret > 0) || (sync_work->version != work_ver))
 				break;
-
-			/* We should wake up now */
-			if  (__check_wakeup_event()) {
-				spin_lock(&sync_work->lock);
-				sync_work->waiter--;
-				spin_unlock(&sync_work->lock);
-				dbg_print("[intr_sync] detect wakeup event "
-					"while waiting work[%d]\n", work_idx);
-				return -EBUSY;
-			}
-//			dbg_print("[intr_sync] timeout work[%d]\n", work_idx);
+//			dbg_print("intr_sync: timeout work[%d]\n", work_idx);
 		} while (1);
 
 		spin_lock(&sync_work->lock);
@@ -188,7 +231,7 @@ find_idle:
 		if (sync_ret)
 			*sync_ret = sync_work->ret;
 		spin_unlock(&sync_work->lock);
-		dbg_print("[intr_sync] sync work[%d] is done with ret(%d)\n",
+		dbg_print("intr_sync: sync work[%d] is done with ret(%d)\n",
 				work_idx, sync_work->ret);
 		return 0;
 	}
@@ -207,7 +250,7 @@ find_idle:
 		init_completion(&intr_sync_work[0].done);
 		init_completion(&intr_sync_work[1].done);
 		intr_sync_wq = alloc_ordered_workqueue("intr_syncd", WQ_MEM_RECLAIM);
-		dbg_print("\n[intr_sync] try to allocate intr_sync_queue\n");
+		dbg_print("\nintr_sync: try to allocate intr_sync_queue\n");
 	}
 	mutex_unlock(&intr_sync_wq_lock);
 
@@ -215,7 +258,7 @@ find_idle:
 	if (likely(intr_sync_wq))
 		goto enqueue_sync_wait;
 
-	printk("\n[intr_sync] allocation failed, just call sync()\n");
+	printk("\nintr_sync: allocation failed, just call sync()\n");
 	ret = sys_sync();
 	if (sync_ret)
 		*sync_ret = ret;
@@ -368,6 +411,9 @@ SYSCALL_DEFINE1(syncfs, int, fd)
 	struct super_block *sb;
 	int ret;
 
+	if (!fsync_enabled)
+		return 0;
+
 	if (!f.file)
 		return -EBADF;
 	sb = f.file->f_path.dentry->d_sb;
@@ -395,6 +441,9 @@ int vfs_fsync_range(struct file *file, loff_t start, loff_t end, int datasync)
 {
 	struct inode *inode = file->f_mapping->host;
 
+	if (!fsync_enabled)
+		return 0;
+
 	if (!file->f_op->fsync)
 		return -EINVAL;
 	if (!datasync && (inode->i_state & I_DIRTY_TIME)) {
@@ -417,6 +466,9 @@ EXPORT_SYMBOL(vfs_fsync_range);
  */
 int vfs_fsync(struct file *file, int datasync)
 {
+	if (!fsync_enabled)
+		return 0;
+		
 	return vfs_fsync_range(file, 0, LLONG_MAX, datasync);
 }
 EXPORT_SYMBOL(vfs_fsync);
@@ -425,6 +477,9 @@ static int do_fsync(unsigned int fd, int datasync)
 {
 	struct fd f = fdget(fd);
 	int ret = -EBADF;
+	
+	if (!fsync_enabled)
+		return 0;
 
 	if (f.file) {
 		ret = vfs_fsync(f.file, datasync);
@@ -435,11 +490,17 @@ static int do_fsync(unsigned int fd, int datasync)
 
 SYSCALL_DEFINE1(fsync, unsigned int, fd)
 {
+	if (!fsync_enabled)
+		return 0;
+
 	return do_fsync(fd, 0);
 }
 
 SYSCALL_DEFINE1(fdatasync, unsigned int, fd)
 {
+	if (!fsync_enabled)
+		return 0;
+		
 	return do_fsync(fd, 1);
 }
 
@@ -498,6 +559,9 @@ SYSCALL_DEFINE4(sync_file_range, int, fd, loff_t, offset, loff_t, nbytes,
 	struct address_space *mapping;
 	loff_t endbyte;			/* inclusive */
 	umode_t i_mode;
+
+	if (!fsync_enabled)
+		return 0;
 
 	ret = -EINVAL;
 	if (flags & ~VALID_FLAGS)

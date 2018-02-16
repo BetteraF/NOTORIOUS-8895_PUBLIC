@@ -50,7 +50,7 @@ static struct inet_protosw pingv6_protosw = {
 	.type =      SOCK_DGRAM,
 	.protocol =  IPPROTO_ICMPV6,
 	.prot =      &pingv6_prot,
-	.ops =       &inet6_dgram_ops,
+	.ops =       &inet6_sockraw_ops,
 	.flags =     INET_PROTOSW_REUSE,
 };
 
@@ -135,7 +135,7 @@ int ping_v6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	fl6.saddr = np->saddr;
 	fl6.daddr = *daddr;
 	fl6.flowi6_mark = sk->sk_mark;
-	fl6.flowi6_uid = sock_i_uid(sk);
+	fl6.flowi6_uid = sk->sk_uid;
 	fl6.fl6_icmp_type = user_icmph.icmp6_type;
 	fl6.fl6_icmp_code = user_icmph.icmp6_code;
 	security_sk_classify_flow(sk, flowi6_to_flowi(&fl6));
@@ -151,8 +151,10 @@ int ping_v6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	rt = (struct rt6_info *) dst;
 
 	np = inet6_sk(sk);
-	if (!np)
-		return -EBADF;
+	if (!np) {
+		err = -EBADF;
+		goto dst_err_out;
+	}
 
 	if (!fl6.flowi6_oif && ipv6_addr_is_multicast(&fl6.daddr))
 		fl6.flowi6_oif = np->mcast_oif;
@@ -186,6 +188,9 @@ int ping_v6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 						 len);
 	}
 	release_sock(sk);
+
+dst_err_out:
+	dst_release(dst);
 
 	if (err)
 		return err;

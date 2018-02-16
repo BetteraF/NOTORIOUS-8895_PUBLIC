@@ -36,6 +36,7 @@ extern int exynos_ss_post_reboot(void);
 extern int exynos_ss_set_hardlockup(int);
 extern int exynos_ss_get_hardlockup(void);
 extern unsigned int exynos_ss_get_item_size(char *);
+extern unsigned long exynos_ss_get_item_vaddr(char *);
 extern unsigned int exynos_ss_get_item_paddr(char *);
 extern bool exynos_ss_dumper_one(void *, char *, size_t, size_t *);
 extern void exynos_ss_panic_handler_safe(void);
@@ -45,6 +46,7 @@ extern unsigned long exynos_ss_get_last_pc(unsigned int cpu);
 extern unsigned long exynos_ss_get_last_pc_paddr(void);
 extern void exynos_ss_hook_hardlockup_entry(void *v_regs);
 extern void exynos_ss_hook_hardlockup_exit(void);
+extern void exynos_ss_dump_task_info(void);
 
 #ifdef CONFIG_EXYNOS_DRAMTEST
 extern int disable_mc_powerdn(void);
@@ -158,12 +160,6 @@ extern int exynos_ss_hook_pmsg(char *buffer, size_t count);
 #define exynos_ss_hook_pmsg(a,b)	do { } while(0)
 #endif
 
-#ifdef CONFIG_EXYNOS_SNAPSHOT_CRASH_KEY
-void exynos_ss_check_crash_key(unsigned int code, int value);
-#else
-#define exynos_ss_check_crash_key(a,b)	do { } while(0);
-#endif
-
 #ifdef CONFIG_EXYNOS_SNAPSHOT_SFRDUMP
 void exynos_ss_dump_sfr(void);
 #else
@@ -213,7 +209,12 @@ void exynos_ss_dump_sfr(void);
 #define exynos_ss_get_last_pc_paddr()	do { } while(0)
 #define exynos_ss_hook_hardlockup_entry(a) do { } while(0)
 #define exynos_ss_hook_hardlockup_exit() do { } while(0)
+#define exynos_ss_dump_task_info()	do { } while (0)
 
+static inline unsigned long exynos_ss_get_item_vaddr(char *name)
+{
+	return 0;
+}
 static inline bool exynos_ss_dumper_one(void *v_dumper,
 				char *line, size_t size, size_t *len)
 {

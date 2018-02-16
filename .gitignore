@@ -32,7 +32,6 @@
 *.lz4
 *.lzo
 *.patch
-*.diff
 *.gcno
 modules.builtin
 Module.symvers
@@ -106,7 +105,7 @@ ID
 *.log
 *.dtb
 *.orig
-*.rej
+*.log
 *~
 \#*#
 

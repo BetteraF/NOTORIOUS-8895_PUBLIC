@@ -65,8 +65,7 @@
 #include <scsi/scsi_eh.h>
 #include <scsi/scsi_ioctl.h>
 
-#define COMMAND_PRIORITY
-#define HEAD_OF_Q_FEATURE
+#define CUSTOMIZE_UPIU_FLAGS
 
 #include "ufs.h"
 #include "ufshci.h"
@@ -687,6 +686,14 @@ struct ufs_hba {
 #define UFSHCD_CAP_INTR_AGGR (1 << 4)
 	/* Allow only hibern8 without clk gating */
 #define UFSHCD_CAP_FAKE_CLK_GATING (1 << 5)
+	/*
+	 * This capability allows the device auto-bkops to be always enabled
+	 * except during suspend (both runtime and suspend).
+	 * Enabling this capability means that device will always be allowed
+	 * to do background operation when it's active but it might degrade
+	 * the performance of ongoing read/write operations.
+	 */
+#define UFSHCD_CAP_KEEP_AUTO_BKOPS_ENABLED_EXCEPT_SUSPEND (1 << 5)
 
 	struct devfreq *devfreq;
 	struct ufs_clk_scaling clk_scaling;
@@ -811,6 +818,11 @@ static inline void *ufshcd_get_variant(struct ufs_hba *hba)
 {
 	BUG_ON(!hba);
 	return hba->priv;
+}
+static inline bool ufshcd_keep_autobkops_enabled_except_suspend(
+							struct ufs_hba *hba)
+{
+	return hba->caps & UFSHCD_CAP_KEEP_AUTO_BKOPS_ENABLED_EXCEPT_SUSPEND;
 }
 
 extern int ufshcd_runtime_suspend(struct ufs_hba *hba);
@@ -985,6 +997,10 @@ static inline void ufshcd_vops_dbg_register_dump(struct ufs_hba *hba)
 {
 	if (hba->vops && hba->vops->dbg_register_dump)
 		hba->vops->dbg_register_dump(hba);
+#if defined(CONFIG_SCSI_UFS_TEST_MODE)
+	/* do not recover system if test mode is enabled */
+	BUG();
+#endif
 }
 
 static inline u8 ufshcd_vops_get_unipro(struct ufs_hba *hba, int num)

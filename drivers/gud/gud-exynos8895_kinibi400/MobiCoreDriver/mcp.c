@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2016 TRUSTONIC LIMITED
+ * Copyright (c) 2013-2017 TRUSTONIC LIMITED
  * All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or
@@ -27,6 +27,10 @@
 #include <linux/freezer.h>
 #include <asm/barrier.h>
 #include <linux/irq.h>
+#include <linux/version.h>
+#if KERNEL_VERSION(4, 11, 0) <= LINUX_VERSION_CODE
+#include <linux/sched/clock.h>	/* local_clock */
+#endif
 
 #include "public/mc_user.h"
 #include "public/mc_admin.h"
@@ -63,7 +67,7 @@ static struct {
 	/* Wait timeout */
 	u32			timeout;
 	/* Log of last MCP commands */
-#define MCP_LOG_SIZE 256
+#define MCP_LOG_SIZE 1024
 	struct mutex		last_mcp_cmds_mutex; /* Log protection */
 	struct mcp_command_info {
 		u64			cpu_clk;	/* Kernel time */
@@ -254,8 +258,8 @@ static inline int wait_mcp_notification(void)
 		int ret;
 
 		/*
-		* Wait non-interruptible to keep MCP synchronised even if caller
-		* is interrupted by signal.
+		 * Wait non-interruptible to keep MCP synchronised even if caller
+		 * is interrupted by signal.
 		*/
 		ret = wait_for_completion_timeout(&l_ctx.complete, timeout);
 		if (ret > 0)
@@ -325,7 +329,7 @@ static int mcp_cmd(union mcp_message *cmd,
 	memcpy(msg, cmd, sizeof(*msg));
 
 	/* Poke TEE */
-	ret = mcp_notify(&l_ctx.mcp_session);
+	ret = mcp_notify(&l_ctx.mcp_session, cmd_id);
 	if (ret)
 		goto out;
 
@@ -650,14 +654,14 @@ static int mcp_close(void)
 	return mcp_cmd(&cmd, 0, NULL, NULL);
 }
 
-int mcp_notify(struct mcp_session *session)
+int mcp_notify(struct mcp_session *session, u32 payload)
 {
 	if (session->sid == SID_MCP)
 		mc_dev_devel("notify MCP");
 	else
 		mc_dev_devel("notify session %x", session->sid);
 
-	return nq_session_notify(&session->nq_session, session->sid, 0);
+	return nq_session_notify(&session->nq_session, session->sid, payload);
 }
 
 static inline void session_notif_handler(struct mcp_session *session, u32 id,

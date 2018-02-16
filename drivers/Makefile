@@ -102,6 +102,7 @@ obj-$(CONFIG_USB_PHY)		+= usb/
 obj-$(CONFIG_USB)		+= usb/
 obj-$(CONFIG_PCI)		+= usb/
 obj-$(CONFIG_USB_GADGET)	+= usb/
+obj-$(CONFIG_OF)		+= usb/
 obj-$(CONFIG_SERIO)		+= input/serio/
 obj-$(CONFIG_GAMEPORT)		+= input/gameport/
 obj-$(CONFIG_INPUT)		+= input/
@@ -195,6 +196,9 @@ obj-$(CONFIG_SENSORS_SSP)	+= sensorhub/
 # Fingeprint sensor driver
 obj-$(CONFIG_SENSORS_FINGERPRINT)	+= fingerprint/
 
+# COMBO REDRIVER
+obj-$(CONFIG_COMBO_REDRIVER)	+= redriver/
+
 # Gps driver
 obj-$(CONFIG_GPS_BCMxxxxx)	+= gps/
 
@@ -203,3 +207,9 @@ obj-y                           += motor/
 
 # CCIC
 obj-y	+= ccic/
+
+# Gator for ARM DS5 tool
+obj-$(CONFIG_GATOR)	+= gator_5.26/
+
+# RKP
+obj-$(CONFIG_RKP) 		+= rkp/

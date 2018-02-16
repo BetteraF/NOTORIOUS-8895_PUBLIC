@@ -378,16 +378,39 @@ static void dpm_show_time(ktime_t starttime, pm_message_t state, char *info)
 		usecs / USEC_PER_MSEC, usecs % USEC_PER_MSEC);
 }
 
+#if defined(CONFIG_SEC_NAD_BALANCER) && defined(CONFIG_SEC_FACTORY)
+extern void report_sleep_info(struct device *dev, pm_message_t state,
+		       unsigned long long usec);
+
+static void sec_nad_debug_report(struct device *dev, ktime_t calltime,
+				  pm_message_t state)
+{
+	ktime_t rettime;
+	s64 nsecs;
+
+	rettime = ktime_get();
+	nsecs = (s64) ktime_to_ns(ktime_sub(rettime, calltime));
+
+	report_sleep_info(dev, state, (unsigned long long)nsecs >> 10);
+}
+#endif
+
 static int dpm_run_callback(pm_callback_t cb, struct device *dev,
 			    pm_message_t state, char *info)
 {
 	ktime_t calltime;
+#if defined(CONFIG_SEC_NAD_BALANCER) && defined(CONFIG_SEC_FACTORY)
+	ktime_t nad_calltime;
+#endif
 	int error;
 
 	if (!cb)
 		return 0;
 
 	calltime = initcall_debug_start(dev);
+#if defined(CONFIG_SEC_NAD_BALANCER) && defined(CONFIG_SEC_FACTORY)
+	nad_calltime = ktime_get();
+#endif
 
 	pm_dev_dbg(dev, state, info);
 	trace_device_pm_callback_start(dev, info, state.event);
@@ -398,6 +421,9 @@ static int dpm_run_callback(pm_callback_t cb, struct device *dev,
 	suspend_report_result(cb, error);
 
 	initcall_debug_report(dev, calltime, error, state, info);
+#if defined(CONFIG_SEC_NAD_BALANCER) && defined(CONFIG_SEC_FACTORY)
+	sec_nad_debug_report(dev, nad_calltime, state);
+#endif
 
 	return error;
 }
@@ -678,6 +704,10 @@ void dpm_resume_early(pm_message_t state)
 {
 	struct device *dev;
 	ktime_t starttime = ktime_get();
+
+#ifdef CONFIG_BOEFFLA_WL_BLOCKER
+	pm_print_active_wakeup_sources();
+#endif
 
 	trace_suspend_resume(TPS("dpm_resume_early"), state.event, true);
 	mutex_lock(&dpm_list_mtx);
@@ -1032,6 +1062,8 @@ static int __device_suspend_noirq(struct device *dev, pm_message_t state, bool a
 	TRACE_DEVICE(dev);
 	TRACE_SUSPEND(0);
 
+	dpm_wait_for_children(dev, async);
+
 	if (async_error)
 		goto Complete;
 
@@ -1042,8 +1074,6 @@ static int __device_suspend_noirq(struct device *dev, pm_message_t state, bool a
 
 	if (dev->power.syscore || dev->power.direct_complete)
 		goto Complete;
-
-	dpm_wait_for_children(dev, async);
 
 	if (dev->pm_domain) {
 		info = "noirq power domain ";
@@ -1179,6 +1209,8 @@ static int __device_suspend_late(struct device *dev, pm_message_t state, bool as
 
 	__pm_runtime_disable(dev, false);
 
+	dpm_wait_for_children(dev, async);
+
 	if (async_error)
 		goto Complete;
 
@@ -1189,8 +1221,6 @@ static int __device_suspend_late(struct device *dev, pm_message_t state, bool as
 
 	if (dev->power.syscore || dev->power.direct_complete)
 		goto Complete;
-
-	dpm_wait_for_children(dev, async);
 
 	if (dev->pm_domain) {
 		info = "late power domain ";

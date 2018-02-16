@@ -447,6 +447,9 @@ static int muic_probe(struct platform_device *pdev)
 	if (pmuic->pdata->init_switch_dev_cb)
 		pmuic->pdata->init_switch_dev_cb();
 
+	if (pmuic->pdata->init_cable_data_collect_cb)
+		pmuic->pdata->init_cable_data_collect_cb();
+
 	pr_info("  switch_sel : 0x%04x\n", get_switch_sel());
 
 	if (!(get_switch_sel() & SWITCH_SEL_RUSTPROOF_MASK)) {
@@ -474,8 +477,10 @@ static int muic_probe(struct platform_device *pdev)
 #if defined(CONFIG_MUIC_SUPPORT_CCIC)
 	pmuic->opmode = get_ccic_info() & 0x0F;
 	pmuic->afc_water_disable = false;
+	pmuic->afc_tsub_disable = false;
 	pmuic->is_ccic_attach = false;
-	pmuic->is_ccic_afc_enable = false;
+	pmuic->is_ccic_afc_enable = 0;
+	pmuic->is_ccic_rp56_enable = false;
 #if defined(CONFIG_SEC_FACTORY)
 	f_opmode = pmuic->opmode;
 #endif
@@ -486,7 +491,7 @@ static int muic_probe(struct platform_device *pdev)
 	/* create sysfs group */
 	ret = sysfs_create_group(&switch_device->kobj, &muic_sysfs_group);
 	if (ret) {
-		pr_err("%s: failed to create sm5703 muic attribute group\n",
+		pr_err("%s: failed to create max77865 muic attribute group\n",
 			__func__);
 		goto fail;
 	}
